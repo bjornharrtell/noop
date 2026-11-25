@@ -14,6 +14,7 @@ pub mod media;
 pub mod ops;
 pub mod push;
 pub mod secrets;
+pub mod setup;
 pub mod stream;
 pub mod web;
 

@@ -1,0 +1,126 @@
+# The self-hosted Noop server (rust/) and its web app. A tag `server-vX.Y.Z` publishes a GitHub release with:
+#   noop-server-x86_64-linux.tar.gz, noop-server-aarch64-linux.tar.gz   the server and rust/deploy/ files
+#   noop-web.tar.gz                                                     the web app (NSH web package)
+#   SHA256SUMS
+# and deploys GitHub Pages (source: GitHub Actions) with the installer, rust/deploy/install.sh, and rust/pages/. Asset names carry no version,
+# so `releases/latest/download/<asset>` always resolves. Running it by hand builds everything without publishing.
+name: server-release
+on:
+  push:
+    tags: ["server-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NSH_REF: nightly
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  server:
+    name: server (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Built on the oldest supported Ubuntu, so the binary runs on any newer glibc.
+          - { arch: x86_64, os: ubuntu-22.04 }
+          - { arch: aarch64, os: ubuntu-22.04-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Test
+        working-directory: rust
+        run: cargo clippy --all-targets -- -D warnings && cargo test
+      - name: Build
+        working-directory: rust
+        run: |
+          cargo build --release --locked
+          mkdir -p "$RUNNER_TEMP/pkg/deploy"
+          cp target/release/noop-server "$RUNNER_TEMP/pkg/"
+          cp deploy/* "$RUNNER_TEMP/pkg/deploy/"
+          mkdir -p "$GITHUB_WORKSPACE/assets"
+          tar -czf "$GITHUB_WORKSPACE/assets/noop-server-${{ matrix.arch }}-linux.tar.gz" -C "$RUNNER_TEMP/pkg" .
+          "$RUNNER_TEMP/pkg/noop-server" version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.arch }}
+          path: assets/*
+
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-nsh
+        with:
+          ref: ${{ env.NSH_REF }}
+          target: web
+      - name: Package
+        run: |
+          # Settings › Version shows the release the app was built for.
+          [ "$GITHUB_REF_TYPE" != tag ] || printf 'export const CLIENT_VERSION = "%s";\n' "${GITHUB_REF_NAME#server-v}" > app/version.ts
+          app/build-web.sh --build "$GITHUB_RUN_NUMBER"
+          mkdir -p assets
+          tar -czf assets/noop-web.tar.gz -C app/dist/web/noop .
+          ls -l assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: assets/*
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [server, web]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd assets && sha256sum noop-*.tar.gz > SHA256SUMS && cat SHA256SUMS && cd ..
+          gh release create "$GITHUB_REF_NAME" assets/* --title "Noop server ${GITHUB_REF_NAME#server-v}" --latest \
+            --notes "Install or update on a Linux VPS: \`curl -fsSL https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/install.sh | sudo bash\` (see rust/deploy/README.md)."
+
+  pages:
+    if: github.ref_type == 'tag'
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Site
+        run: |
+          mkdir -p site
+          cp rust/deploy/install.sh rust/pages/index.html site/
+          touch site/.nojekyll
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Noop server — install</title>
+<style>
+:root{color-scheme:light dark}
+body{margin:0;font:16px/1.6 -apple-system,system-ui,sans-serif;background:Canvas;color:CanvasText}
+main{max-width:760px;margin:6vh auto;padding:0 20px}
+h1{font-size:28px;margin:0 0 4px}h2{font-size:19px;margin:32px 0 8px}
+p.lead{color:GrayText;margin:0 0 24px}
+pre{background:#8881;border:1px solid #8883;border-radius:8px;padding:12px 14px;overflow-x:auto;font:14px/1.5 ui-monospace,Menlo,monospace}
+code{font:0.92em ui-monospace,Menlo,monospace}
+li{margin:6px 0}
+</style>
+</head>
+<body><main>
+<h1>Noop server</h1>
+<p class="lead">Your own Noop on a small Linux VPS: one Rust binary, SQLite, the web app, HTTPS by Caddy.
+Source and releases: <a href="https://github.com/bjornharrtell/noop/releases">github.com/bjornharrtell/noop</a>.</p>
+
+<h2>1. Install</h2>
+<p>On a Debian or Ubuntu VPS (x86_64 or ARM, 1 GB RAM is plenty), with a DNS name pointing at it:</p>
+<pre>curl -fsSL https://bjornharrtell.github.io/noop/install.sh | sudo bash -s -- \
+  --domain noop.example.com --email you@example.com --firewall</pre>
+<ul>
+<li><code>--domain</code>: the name Caddy gets an HTTPS certificate for. On Hetzner the server's own name works,
+  e.g. <code>static.218.116.29.2.clients.your-server.de</code>.</li>
+<li><code>--email</code>: who may sign in.</li>
+<li><code>--firewall</code>: allow only SSH, HTTP and HTTPS (leave it out on a server that runs other things).</li>
+</ul>
+
+<h2>2. First sign-in</h2>
+<p>Signing in takes three things: your email, a one-time code, and the code from an authenticator app.</p>
+<ol>
+<li><b>Bind your authenticator app</b> (Google Authenticator, 1Password, Authy…). On the VPS:
+<pre>sudo -u noop noop-server 2fa-setup</pre>
+Scan the QR code it shows, then type the 6-digit code the app shows.</li>
+<li><b>Open your Noop address</b> (<code>https://noop.example.com</code>), enter your email and press <i>Send code</i>.</li>
+<li><b>Get the one-time code</b>:
+  <ul>
+  <li>without email set up, on the VPS: <pre>sudo -u noop noop-server login-code</pre></li>
+  <li>or by email, once <code>HUB_SMTP</code> is set (below).</li>
+  </ul></li>
+<li>Enter that code and the authenticator's current code. On a phone, add the page to the home screen and allow
+notifications.</li>
+</ol>
+
+<h2>Codes by email (optional)</h2>
+<p>Edit the settings with <code>sudoedit /etc/noop/noop.env</code> and set one line, for example with a Gmail
+<a href="https://myaccount.google.com/apppasswords">app password</a>:</p>
+<pre>HUB_SMTP={"host":"smtp.gmail.com","port":465,"user":"you@gmail.com","pass":"abcd efgh ijkl mnop","from":"Noop &lt;you@gmail.com&gt;"}</pre>
+<p>Port 465 is TLS, 587 is STARTTLS. Then:</p>
+<pre>sudo systemctl restart noop-server
+sudo -u noop noop-server test-mail you@example.com</pre>
+
+<h2>Update</h2>
+<pre>curl -fsSL https://bjornharrtell.github.io/noop/install.sh | sudo bash</pre>
+<p>Replaces the server and the web app; settings (<code>/etc/noop/noop.env</code>) and data
+(<code>/var/lib/noop</code>) are kept. Nightly backups are in <code>/var/lib/noop/backups</code>.</p>
+
+<h2>Connect your machines</h2>
+<p>The machines that run your agents connect with the machine key, <code>HUB_TOKEN</code> in
+<code>/etc/noop/noop.env</code>, and the address <code>https://noop.example.com</code>.</p>
+</main></body>
+</html>
