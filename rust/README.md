@@ -56,14 +56,15 @@ Done:
 - Web client at `/` from `NOOP_WEB_DIR`, precompressed `.br`/`.gz` for hashed assets, SPA fallback.
 - WebSockets: `/api/stream` (feed events; `?v=2` adds `$status` frames), `/api/host/stream` (inbox nudges,
   watcher counts; an open socket keeps the primary online).
+- Media: `/api/media` (≤ 30 MB), `/api/uploads` (owner images/Markdown, sniffed, ≤ 10 MB), `/media/<id>` with
+  byte ranges and sandboxed headers; pruning by `media_days`.
 
 To do, in order:
-1. Media and uploads: `/api/media`, `/api/uploads`, `/media/<id>`.
-2. Web Push (VAPID, `aes128gcm`), `/api/push/*` (the browser's notifications).
-3. Secrets (`/api/secrets*`), MCP OAuth client (`/api/mcp-oauth*`), guests (`/api/guest*`).
-4. MCP server and OAuth 2.1 provider (`/mcp`, `/oauth/*`, `/.well-known/*`).
-5. `/api/host/export|import`, `/api/usage`, `HUB_ALLOW_IPS`.
-6. Deployment: systemd unit, Caddy example, backups (Litestream or nightly `.backup`).
+1. Web Push (VAPID, `aes128gcm`), `/api/push/*` (the browser's notifications).
+2. Secrets (`/api/secrets*`), MCP OAuth client (`/api/mcp-oauth*`), guests (`/api/guest*`).
+3. MCP server and OAuth 2.1 provider (`/mcp`, `/oauth/*`, `/.well-known/*`).
+4. `/api/host/export|import`, `/api/usage`, `HUB_ALLOW_IPS`.
+5. Deployment: systemd unit, Caddy example, backups (Litestream or nightly `.backup`).
 
 Not ported on purpose: Cloudflare free-plan metering and shedding (`FREE`, `TARGET`, `LEAN`, `SHED`),
 `HUB_MOVED_TO`, Cloudflare Email Routing, `/api/updates/direct/*` (native app updates; there are no native apps).

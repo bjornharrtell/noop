@@ -8,6 +8,7 @@ pub mod db;
 pub mod feed;
 pub mod files;
 pub mod mail;
+pub mod media;
 pub mod stream;
 pub mod web;
 
@@ -79,6 +80,10 @@ async fn route(app: &Arc<App>, req: &Req) -> rusqlite::Result<Response> {
     }
     if p == "/api/stream" || p == "/api/host/stream" {
         return Ok(stream::open(app, req, &w));
+    }
+    // reads the multipart body before taking the database
+    if let Some(r) = media::routes(app, req).await? {
+        return Ok(r);
     }
     let mut c = app.db();
     let machine = w == Who::Machine;

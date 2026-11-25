@@ -39,6 +39,43 @@ impl T {
         let app = App::new(rusqlite::Connection::open_in_memory().unwrap(), cfg, Some(Arc::new(move || c2.load(Ordering::SeqCst)))).unwrap();
         T { app, clock }
     }
+    /// POST a multipart form with one `file` field.
+    pub async fn upload(&self, path: &str, auth: &str, filename: Option<&str>, ty: Option<&str>, data: &[u8]) -> (u16, Value) {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"--XBOUNDARY\r\nContent-Disposition: form-data; name=\"file\"");
+        if let Some(f) = filename {
+            body.extend_from_slice(format!("; filename=\"{f}\"").as_bytes());
+        }
+        body.extend_from_slice(b"\r\n");
+        if let Some(t) = ty {
+            body.extend_from_slice(format!("Content-Type: {t}\r\n").as_bytes());
+        }
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(data);
+        body.extend_from_slice(b"\r\n--XBOUNDARY--\r\n");
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("authorization", format!("Bearer {auth}"))
+            .header("content-type", "multipart/form-data; boundary=XBOUNDARY")
+            .body(Body::from(body))
+            .unwrap();
+        let res = noop_server::router(self.app.clone()).oneshot(req).await.unwrap();
+        let status = res.status().as_u16();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+    /// Any request; the body as bytes and the headers.
+    pub async fn bytes(&self, method: &str, path: &str, headers: &[(&str, &str)]) -> (u16, Vec<u8>, std::collections::HashMap<String, String>) {
+        let mut b = Request::builder().method(method).uri(path);
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        let res = noop_server::router(self.app.clone()).oneshot(b.body(Body::empty()).unwrap()).await.unwrap();
+        let status = res.status().as_u16();
+        let h = res.headers().iter().map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string())).collect();
+        (status, res.into_body().collect().await.unwrap().to_bytes().to_vec(), h)
+    }
     /// A request without auth; the body as text and the headers.
     pub async fn raw(&self, method: &str, path: &str, headers: &[(&str, &str)]) -> (u16, String, std::collections::HashMap<String, String>) {
         let mut b = Request::builder().method(method).uri(path);
