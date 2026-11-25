@@ -1,6 +1,7 @@
 //! Logic shared by the Noop server and the machine program. No I/O here.
 pub mod authcode;
 pub mod budget;
+pub mod ipallow;
 pub mod notify;
 pub mod paths;
 pub mod tools;

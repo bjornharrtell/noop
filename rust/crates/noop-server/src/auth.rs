@@ -302,8 +302,9 @@ pub fn host_routes(app: &Arc<App>, c: &Connection, req: &Req, w: &Who) -> rusqli
         let by = host().unwrap_or_else(|| app.l("a host holding the machine key", "持有机器密钥的主机"));
         if p == "/api/host/2fa" && m == Method::GET {
             let t = totp_state(c);
-            // allow_ips: HUB_ALLOW_IPS is refused at startup by this server, so it is never set here
-            return Ok(Some(ok(json!({ "bound": t.is_some(), "since": t.and_then(|t| t.get("bound").cloned()), "allow_ips": null }))));
+            // also what `noop security` can't see from config.toml: the live allow-list
+            let allow = app.cfg.allow_ips.as_ref().map(Vec::len);
+            return Ok(Some(ok(json!({ "bound": t.is_some(), "since": t.and_then(|t| t.get("bound").cloned()), "allow_ips": allow }))));
         }
         if p == "/api/host/2fa/setup" && m == Method::POST {
             let secret = new_secret();

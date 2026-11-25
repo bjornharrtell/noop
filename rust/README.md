@@ -36,7 +36,7 @@ HUB_TOKEN=<machine key> HUB_OWNER_EMAIL=you@example.com NOOP_DB=/var/lib/noop/no
 | `NOOP_WEB_DIR` | The web client package (`app/dist/web/noop`). Unknown paths get its `index.html`. |
 | `HUB_VAPID_PUBLIC`, `HUB_VAPID_PRIVATE` | Web Push keys. Reuse the Worker's values (in `~/.noop/vapid.json`) to keep browsers subscribed, or run `noop-server vapid-keys` once. |
 
-`HUB_ALLOW_IPS` is refused at startup until it is ported; restrict access at the firewall meanwhile.
+| `HUB_ALLOW_IPS` | Optional source-IP allow-list (IPs / CIDRs). Behind a proxy, set `NOOP_CLIENT_IP_HEADER` too. |
 
 ## Test
 
@@ -65,14 +65,29 @@ Done:
 - Signing in to remote MCP servers `/api/mcp-oauth*` (discovery, dynamic registration, PKCE, refresh before
   handing a token to a machine). The redirect URI uses `X-Forwarded-Proto`/`X-Forwarded-Host` from the proxy.
 - Guest workers `/api/guest/*`, `/api/guests/*`.
+- `/api/host/export|import` (the Worker's shapes), `noop-server import-from <worker url>`, `/api/usage`
+  (requests per route today), `HUB_ALLOW_IPS` (checked before every path, web client included).
 
-To do, in order:
-1. MCP server and OAuth 2.1 provider (`/mcp`, `/oauth/*`, `/.well-known/*`).
-2. `/api/host/export|import`, `/api/usage`, `HUB_ALLOW_IPS`.
-3. Deployment: systemd unit, Caddy example, backups (Litestream or nightly `.backup`).
+To do:
+1. Deployment: systemd unit, Caddy example, backups (Litestream or nightly `.backup`).
+
+Skipped for now (owner's decision, 2026-11-25): the MCP server for Claude / ChatGPT connectors (`/mcp`, `/oauth/*`,
+`/.well-known/*` answer 404). The web app does not use it.
 
 Not ported on purpose: Cloudflare free-plan metering and shedding (`FREE`, `TARGET`, `LEAN`, `SHED`),
 `HUB_MOVED_TO`, Cloudflare Email Routing, `/api/updates/direct/*` (native app updates; there are no native apps).
+
+## Moving from Cloudflare
+
+Stop nothing yet; the Worker keeps serving while you copy.
+
+```bash
+NOOP_DB=/var/lib/noop/noop.db NOOP_IMPORT_TOKEN=<the Worker's HUB_TOKEN> noop-server import-from https://<your-worker>
+```
+
+Every table is copied (and replaced) page by page: files and their history, the feed, sessions (so signed-in
+browsers stay signed in), secrets, MCP sign-ins, push subscriptions, media. Run it again right before switching to
+pick up the latest changes. Use the Worker's HUB_TOKEN on the new server too: secrets are sealed with it.
 
 ## Machine program
 

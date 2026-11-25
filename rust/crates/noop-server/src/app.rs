@@ -30,15 +30,23 @@ pub struct Config {
     /// HUB_VAPID_PUBLIC / HUB_VAPID_PRIVATE: Web Push keys (b64url point, JWK JSON).
     pub vapid_public: Option<String>,
     pub vapid_private: Option<String>,
+    /// HUB_ALLOW_IPS: source-IP allow-list (IPs / CIDRs). Some → everyone else gets 403.
+    pub allow_ips: Option<Vec<noop_core::ipallow::Net>>,
 }
 
 impl Config {
     pub fn from_env() -> Result<Config, String> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let hub_token = var("HUB_TOKEN").ok_or("HUB_TOKEN is not set")?;
-        if var("HUB_ALLOW_IPS").is_some() {
-            // fail closed: an allow-list the server ignores would leave the owner believing it is enforced
-            return Err("HUB_ALLOW_IPS is not supported by this server yet; unset it or restrict access at the firewall".into());
+        let allow_ips = var("HUB_ALLOW_IPS").map(|raw| {
+            let (nets, bad) = noop_core::ipallow::parse_allow_list(&raw);
+            if !bad.is_empty() {
+                tracing::error!("HUB_ALLOW_IPS: ignored {}", bad.join(" "));
+            }
+            nets
+        });
+        if allow_ips.is_some() && var("NOOP_CLIENT_IP_HEADER").is_none() {
+            tracing::warn!("HUB_ALLOW_IPS without NOOP_CLIENT_IP_HEADER: behind a proxy every request comes from the proxy's address");
         }
         let smtp = match var("HUB_SMTP") {
             Some(s) => Some(serde_json::from_str::<SmtpCfg>(&s).map_err(|e| format!("HUB_SMTP is not valid JSON: {e}"))?),
@@ -53,6 +61,7 @@ impl Config {
             web_dir: var("NOOP_WEB_DIR").map(std::path::PathBuf::from),
             vapid_public: var("HUB_VAPID_PUBLIC"),
             vapid_private: var("HUB_VAPID_PRIVATE"),
+            allow_ips,
         })
     }
 }
@@ -83,6 +92,8 @@ pub struct App {
     pub vapid: Option<crate::push::Vapid>,
     /// Outgoing HTTP (push services, MCP servers).
     pub http: reqwest::Client,
+    /// Requests per route today.
+    pub usage: crate::ops::Usage,
     me: std::sync::Weak<App>,
 }
 
@@ -111,6 +122,7 @@ impl App {
         Ok(Arc::new_cyclic(|me| App {
             me: me.clone(),
             vapid,
+            usage: crate::ops::Usage::default(),
             http: reqwest::Client::builder().user_agent("noop-server").build().expect("HTTP client"),
             db: Mutex::new(conn),
             cfg,

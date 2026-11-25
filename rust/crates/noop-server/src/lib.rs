@@ -11,6 +11,7 @@ pub mod guests;
 pub mod mail;
 pub mod mcp_oauth;
 pub mod media;
+pub mod ops;
 pub mod push;
 pub mod secrets;
 pub mod stream;
@@ -50,6 +51,11 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
         peer,
         ws: std::sync::Mutex::new(ws),
     };
+    // HUB_ALLOW_IPS: checked before anything else, the web client included
+    if let Some(blocked) = ops::ip_gate(&app, &req) {
+        return blocked;
+    }
+    app.usage.count(&app.iso(app.now())[..10], ops::route_key(&req.method, &req.path));
     match route(&app, &req).await {
         Ok(r) => r,
         Err(e) => {
@@ -114,6 +120,9 @@ async fn route(app: &Arc<App>, req: &Req) -> rusqlite::Result<Response> {
         return Ok(r);
     }
     if let Some(r) = mcp_oauth::routes(app, req, &w).await? {
+        return Ok(r);
+    }
+    if let Some(r) = ops::routes(app, req, &w)? {
         return Ok(r);
     }
     let mut c = app.db();
