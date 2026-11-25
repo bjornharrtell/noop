@@ -75,8 +75,9 @@ pub fn kv_del(c: &Connection, k: &str) -> rusqlite::Result<()> {
     c.execute("DELETE FROM kv WHERE k = ?", [k]).map(|_| ())
 }
 
-/// Store a feed event: `{id, ts, ...e}` and send it to owner sockets. The feed keeps the newest 5000.
-/// TODO(rust-port): MCP subscribers and Web Push once those are ported.
+/// Store a feed event: `{id, ts, ...e}`, send it to owner sockets and, when it deserves one, as a phone
+/// notification. The feed keeps the newest 5000.
+/// TODO(rust-port): MCP subscribers once the MCP server is ported.
 pub fn append(app: &App, c: &Connection, e: Value) -> Value {
     let now = app.now();
     let mut ev = Map::new();
@@ -95,6 +96,9 @@ pub fn append(app: &App, c: &Connection, e: Value) -> Value {
         tracing::error!("append event: {e}");
     }
     let _ = app.owner_tx.send(crate::app::Frame::Event(std::sync::Arc::from(text)));
+    if let Some(me) = app.arc() {
+        crate::push::notify_event(&me, c, &ev);
+    }
     let mut b = [0u8; 1];
     noop_core::random_bytes(&mut b);
     if b[0] < 5 {

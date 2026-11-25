@@ -27,6 +27,9 @@ pub struct Config {
     pub client_ip_header: Option<String>,
     /// NOOP_WEB_DIR: the web client package (`app/build-web.sh` output, app/dist/web/noop).
     pub web_dir: Option<std::path::PathBuf>,
+    /// HUB_VAPID_PUBLIC / HUB_VAPID_PRIVATE: Web Push keys (b64url point, JWK JSON).
+    pub vapid_public: Option<String>,
+    pub vapid_private: Option<String>,
 }
 
 impl Config {
@@ -48,6 +51,8 @@ impl Config {
             en: var("HUB_LANG").is_some_and(|l| l.to_lowercase().starts_with("en")),
             client_ip_header: var("NOOP_CLIENT_IP_HEADER").map(|h| h.to_lowercase()),
             web_dir: var("NOOP_WEB_DIR").map(std::path::PathBuf::from),
+            vapid_public: var("HUB_VAPID_PUBLIC"),
+            vapid_private: var("HUB_VAPID_PRIVATE"),
         })
     }
 }
@@ -74,6 +79,11 @@ pub struct App {
     pub owner_tx: tokio::sync::broadcast::Sender<Frame>,
     /// Inbox nudges and watcher counts for the primary's socket.
     pub host_tx: tokio::sync::broadcast::Sender<Arc<str>>,
+    /// Web Push keys, when configured.
+    pub vapid: Option<crate::push::Vapid>,
+    /// Outgoing HTTP (push services, MCP servers).
+    pub http: reqwest::Client,
+    me: std::sync::Weak<App>,
 }
 
 /// What owner sockets receive.
@@ -88,7 +98,20 @@ pub enum Frame {
 impl App {
     pub fn new(conn: Connection, cfg: Config, clock: Option<Clock>) -> rusqlite::Result<Arc<App>> {
         crate::db::init(&conn)?;
-        Ok(Arc::new(App {
+        let vapid = match (&cfg.vapid_public, &cfg.vapid_private) {
+            (Some(p), Some(k)) => {
+                let v = crate::push::vapid_from(p, k, &cfg.owners);
+                if v.is_none() {
+                    tracing::error!("HUB_VAPID_PRIVATE is not a P-256 JWK with `d`: Web Push is off");
+                }
+                v
+            }
+            _ => None,
+        };
+        Ok(Arc::new_cyclic(|me| App {
+            me: me.clone(),
+            vapid,
+            http: reqwest::Client::builder().user_agent("noop-server").build().expect("HTTP client"),
             db: Mutex::new(conn),
             cfg,
             clock: clock.unwrap_or_else(|| Arc::new(|| chrono::Utc::now().timestamp_millis())),
@@ -99,6 +122,10 @@ impl App {
             owner_tx: tokio::sync::broadcast::channel(256).0,
             host_tx: tokio::sync::broadcast::channel(64).0,
         }))
+    }
+    /// This App as an Arc, for background tasks started from code that holds `&App`.
+    pub fn arc(&self) -> Option<Arc<App>> {
+        self.me.upgrade()
     }
     pub fn add_host_socket(&self, d: isize) {
         if d > 0 { self.host_sockets.fetch_add(1, Ordering::SeqCst) } else { self.host_sockets.fetch_sub(1, Ordering::SeqCst) };

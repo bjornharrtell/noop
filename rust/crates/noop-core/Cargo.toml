@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 chrono = "0.4.45"
+chrono-tz = "0.10.4"
 getrandom = "0.4.3"
 hmac = "0.13.0"
 regex = "1.13.2"

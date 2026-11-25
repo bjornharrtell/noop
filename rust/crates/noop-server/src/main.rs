@@ -7,6 +7,12 @@ use noop_server::app::{App, Config};
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().nth(1).as_deref() == Some("vapid-keys") {
+        // once, at setup: keep these, or every subscribed browser has to subscribe again
+        let (public, private) = noop_server::push::new_vapid_keys();
+        println!("HUB_VAPID_PUBLIC={public}\nHUB_VAPID_PRIVATE='{private}'");
+        return;
+    }
     tracing_subscriber::fmt().with_env_filter(
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
     ).init();

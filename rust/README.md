@@ -34,6 +34,7 @@ HUB_TOKEN=<machine key> HUB_OWNER_EMAIL=you@example.com NOOP_DB=/var/lib/noop/no
 | `NOOP_LISTEN` | Listen address (default `127.0.0.1:8799`). Put a TLS proxy (Caddy) in front. |
 | `NOOP_CLIENT_IP_HEADER` | Header the proxy puts the client IP in (e.g. `x-forwarded-for`), for security alerts. |
 | `NOOP_WEB_DIR` | The web client package (`app/dist/web/noop`). Unknown paths get its `index.html`. |
+| `HUB_VAPID_PUBLIC`, `HUB_VAPID_PRIVATE` | Web Push keys. Reuse the Worker's values (in `~/.noop/vapid.json`) to keep browsers subscribed, or run `noop-server vapid-keys` once. |
 
 `HUB_ALLOW_IPS` is refused at startup until it is ported; restrict access at the firewall meanwhile.
 
@@ -58,13 +59,14 @@ Done:
   watcher counts; an open socket keeps the primary online).
 - Media: `/api/media` (≤ 30 MB), `/api/uploads` (owner images/Markdown, sniffed, ≤ 10 MB), `/media/<id>` with
   byte ranges and sandboxed headers; pruning by `media_days`.
+- Web Push (RFC 8291 `aes128gcm`, RFC 8292 VAPID), `/api/push/*`; feed events notify per `notify_prefs`
+  (kinds, quiet hours in the owner's time zone). `noop-server vapid-keys` prints a key pair.
 
 To do, in order:
-1. Web Push (VAPID, `aes128gcm`), `/api/push/*` (the browser's notifications).
-2. Secrets (`/api/secrets*`), MCP OAuth client (`/api/mcp-oauth*`), guests (`/api/guest*`).
-3. MCP server and OAuth 2.1 provider (`/mcp`, `/oauth/*`, `/.well-known/*`).
-4. `/api/host/export|import`, `/api/usage`, `HUB_ALLOW_IPS`.
-5. Deployment: systemd unit, Caddy example, backups (Litestream or nightly `.backup`).
+1. Secrets (`/api/secrets*`), MCP OAuth client (`/api/mcp-oauth*`), guests (`/api/guest*`).
+2. MCP server and OAuth 2.1 provider (`/mcp`, `/oauth/*`, `/.well-known/*`).
+3. `/api/host/export|import`, `/api/usage`, `HUB_ALLOW_IPS`.
+4. Deployment: systemd unit, Caddy example, backups (Litestream or nightly `.backup`).
 
 Not ported on purpose: Cloudflare free-plan metering and shedding (`FREE`, `TARGET`, `LEAN`, `SHED`),
 `HUB_MOVED_TO`, Cloudflare Email Routing, `/api/updates/direct/*` (native app updates; there are no native apps).
