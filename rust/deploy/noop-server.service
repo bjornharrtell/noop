@@ -1,0 +1,35 @@
+# /etc/systemd/system/noop-server.service
+# Install: see rust/deploy/README.md. Settings live in /etc/noop/noop.env (mode 600), never in this file.
+[Unit]
+Description=Noop server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=noop
+Group=noop
+EnvironmentFile=/etc/noop/noop.env
+ExecStart=/usr/local/bin/noop-server
+Restart=on-failure
+RestartSec=2
+# Only the database directory is writable; everything else is read-only or hidden.
+StateDirectory=noop
+WorkingDirectory=/var/lib/noop
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+# /etc/systemd/system/noop-backup.service — run by noop-backup.timer. Keeps the newest 14 nightly copies.
+[Unit]
+Description=Noop database backup
+
+[Service]
+Type=oneshot
+User=noop
+Group=noop
+EnvironmentFile=/etc/noop/noop.env
+StateDirectory=noop
+ExecStart=/bin/sh -c 'mkdir -p /var/lib/noop/backups && /usr/local/bin/noop-server backup /var/lib/noop/backups/noop-$(date -u +%%Y%%m%%d).db && ls -1t /var/lib/noop/backups/noop-*.db | tail -n +15 | xargs -r rm --'
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

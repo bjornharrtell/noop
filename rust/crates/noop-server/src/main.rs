@@ -4,6 +4,7 @@
 //!
 //! Subcommands:
 //!   noop-server vapid-keys                 print a new Web Push key pair (once, at setup)
+//!   noop-server backup <file>              write a consistent copy of NOOP_DB (safe while the server runs)
 //!   noop-server import-from <worker url>   copy a Cloudflare Worker's data into NOOP_DB (stop the server first);
 //!                                          NOOP_IMPORT_TOKEN is the Worker's HUB_TOKEN
 use std::net::SocketAddr;
@@ -20,6 +21,20 @@ async fn main() {
         return;
     }
     let db = std::env::var("NOOP_DB").unwrap_or_else(|_| "noop.db".into());
+    if args.get(1).map(String::as_str) == Some("backup") {
+        // a consistent copy while the server runs (WAL readers never block the writer)
+        let Some(out) = args.get(2) else {
+            eprintln!("usage: noop-server backup <file>");
+            std::process::exit(2);
+        };
+        let r = rusqlite::Connection::open(&db).and_then(|c| c.execute("VACUUM INTO ?", [out]).map(|_| ()));
+        if let Err(e) = r {
+            eprintln!("noop-server: backup {db} → {out}: {e}");
+            std::process::exit(1);
+        }
+        println!("{out}");
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("import-from") {
         let (Some(url), Ok(token)) = (args.get(2), std::env::var("NOOP_IMPORT_TOKEN")) else {
             eprintln!("usage: NOOP_IMPORT_TOKEN=<the Worker's HUB_TOKEN> noop-server import-from https://<worker>");

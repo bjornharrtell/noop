@@ -68,8 +68,8 @@ Done:
 - `/api/host/export|import` (the Worker's shapes), `noop-server import-from <worker url>`, `/api/usage`
   (requests per route today), `HUB_ALLOW_IPS` (checked before every path, web client included).
 
-To do:
-1. Deployment: systemd unit, Caddy example, backups (Litestream or nightly `.backup`).
+- Deployment: [deploy/README.md](deploy/README.md) — hardened systemd unit, Caddy (HTTPS), nightly backups via
+  `noop-server backup` (consistent while running), restore and update steps.
 
 Skipped for now (owner's decision, 2026-11-25): the MCP server for Claude / ChatGPT connectors (`/mcp`, `/oauth/*`,
 `/.well-known/*` answer 404). The web app does not use it.

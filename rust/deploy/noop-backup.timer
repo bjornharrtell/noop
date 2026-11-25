@@ -1,0 +1,11 @@
+# /etc/systemd/system/noop-backup.timer
+[Unit]
+Description=Nightly Noop database backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target

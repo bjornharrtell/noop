@@ -1,0 +1,11 @@
+# /etc/caddy/Caddyfile — HTTPS with an automatic certificate, everything proxied to noop-server on localhost.
+# Replace noop.example.com with your domain (its DNS A/AAAA record must point at this VPS).
+noop.example.com {
+	encode zstd gzip
+	# Caddy sets X-Forwarded-For / -Proto / -Host; noop-server reads the client IP from X-Forwarded-For
+	# (NOOP_CLIENT_IP_HEADER=x-forwarded-for) and builds the MCP sign-in redirect from -Proto/-Host.
+	reverse_proxy 127.0.0.1:8799 {
+		# WebSockets (/api/stream, /api/host/stream) and the inbox long-poll stay open
+		flush_interval -1
+	}
+}
