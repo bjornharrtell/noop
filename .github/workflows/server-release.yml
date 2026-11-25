@@ -102,16 +102,13 @@ jobs:
           gh release create "$GITHUB_REF_NAME" assets/* --title "Noop server ${GITHUB_REF_NAME#server-v}" --latest \
             --notes "Install or update on a Linux VPS: \`curl -fsSL https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/install.sh | sudo bash\` (see rust/deploy/README.md)."
 
-  pages:
-    if: github.ref_type == 'tag'
+  # The site is uploaded in one job and deployed in another. deploy-pages in the same job as the upload read the run's
+  # artifact list before the upload was visible and failed with "No artifacts named github-pages were found".
+  pages-site:
+    # also on a manual run, so a failed deploy can be retried without a new tag (publish is skipped then)
+    if: always() && (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch')
     needs: publish
     runs-on: ubuntu-24.04
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - name: Site
@@ -122,5 +119,32 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
+
+  pages:
+    needs: pages-site
+    if: always() && needs.pages-site.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+      actions: read
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Wait for the github-pages artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for _ in $(seq 1 30); do
+            if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
+              --jq '[.artifacts[].name] | any(. == "github-pages")' | grep -q true; then
+              echo "github-pages artifact is available"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the github-pages artifact did not appear within 60 s" >&2
+          exit 1
       - id: deploy
         uses: actions/deploy-pages@v4
