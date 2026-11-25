@@ -7,9 +7,12 @@ pub mod auth;
 pub mod db;
 pub mod feed;
 pub mod files;
+pub mod guests;
 pub mod mail;
+pub mod mcp_oauth;
 pub mod media;
 pub mod push;
+pub mod secrets;
 pub mod stream;
 pub mod web;
 
@@ -69,7 +72,21 @@ async fn route(app: &Arc<App>, req: &Req) -> rusqlite::Result<Response> {
     if p.starts_with("/api/auth/") {
         return auth::auth(app, req).await;
     }
-    // TODO(rust-port): guest workers (/api/guest/join, guest tokens), /api/mcp-oauth/callback
+    // guest workers: a one-time code joins; a guest token reaches /api/guest/* and nothing else
+    if p == "/api/guest/join" && req.method == Method::POST {
+        return guests::join(app, req);
+    }
+    let cred = auth::credential(req);
+    if guests::GUEST_TOKEN.is_match(&cred) {
+        return match guests::who(app, &cred)? {
+            Some(g) => guests::api(app, req, &g),
+            None => Ok(err("unauthorized", 401)),
+        };
+    }
+    // the browser lands here after signing in to an MCP server: no session, the one-time state is the credential
+    if p == "/api/mcp-oauth/callback" && req.method == Method::GET {
+        return mcp_oauth::callback(app, req).await;
+    }
     let Some(w) = auth::who(app, &app.db(), req)? else { return Ok(err("unauthorized", 401)) };
     // a connector's OAuth token is for /mcp only: never the owner API
     if matches!(w, Who::Session { mcp: true, .. }) {
@@ -87,6 +104,16 @@ async fn route(app: &Arc<App>, req: &Req) -> rusqlite::Result<Response> {
         return Ok(r);
     }
     if let Some(r) = push::routes(app, req, &w).await? {
+        return Ok(r);
+    }
+    // these lock the database themselves (std Mutex is not reentrant): keep them before `app.db()` below
+    if let Some(r) = guests::admin(app, req, &w)? {
+        return Ok(r);
+    }
+    if let Some(r) = secrets::routes(app, req, &w).await? {
+        return Ok(r);
+    }
+    if let Some(r) = mcp_oauth::routes(app, req, &w).await? {
         return Ok(r);
     }
     let mut c = app.db();

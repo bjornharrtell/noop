@@ -61,12 +61,15 @@ Done:
   byte ranges and sandboxed headers; pruning by `media_days`.
 - Web Push (RFC 8291 `aes128gcm`, RFC 8292 VAPID), `/api/push/*`; feed events notify per `notify_prefs`
   (kinds, quiet hours in the owner's time zone). `noop-server vapid-keys` prints a key pair.
+- Shared secrets `/api/secrets*`: sealed exactly as the Worker sealed them, so imported secrets open.
+- Signing in to remote MCP servers `/api/mcp-oauth*` (discovery, dynamic registration, PKCE, refresh before
+  handing a token to a machine). The redirect URI uses `X-Forwarded-Proto`/`X-Forwarded-Host` from the proxy.
+- Guest workers `/api/guest/*`, `/api/guests/*`.
 
 To do, in order:
-1. Secrets (`/api/secrets*`), MCP OAuth client (`/api/mcp-oauth*`), guests (`/api/guest*`).
-2. MCP server and OAuth 2.1 provider (`/mcp`, `/oauth/*`, `/.well-known/*`).
-3. `/api/host/export|import`, `/api/usage`, `HUB_ALLOW_IPS`.
-4. Deployment: systemd unit, Caddy example, backups (Litestream or nightly `.backup`).
+1. MCP server and OAuth 2.1 provider (`/mcp`, `/oauth/*`, `/.well-known/*`).
+2. `/api/host/export|import`, `/api/usage`, `HUB_ALLOW_IPS`.
+3. Deployment: systemd unit, Caddy example, backups (Litestream or nightly `.backup`).
 
 Not ported on purpose: Cloudflare free-plan metering and shedding (`FREE`, `TARGET`, `LEAN`, `SHED`),
 `HUB_MOVED_TO`, Cloudflare Email Routing, `/api/updates/direct/*` (native app updates; there are no native apps).
