@@ -70,6 +70,19 @@ pub struct App {
     pub acked: Mutex<i64>,
     host_sockets: AtomicUsize,
     owner_sockets: AtomicUsize,
+    /// Feed events and status frames for owner sockets.
+    pub owner_tx: tokio::sync::broadcast::Sender<Frame>,
+    /// Inbox nudges and watcher counts for the primary's socket.
+    pub host_tx: tokio::sync::broadcast::Sender<Arc<str>>,
+}
+
+/// What owner sockets receive.
+#[derive(Clone, Debug)]
+pub enum Frame {
+    /// A new feed event (sent to every owner socket).
+    Event(Arc<str>),
+    /// `{"$status": …}` (sent to ?v=2 sockets only).
+    Status(Arc<str>),
 }
 
 impl App {
@@ -83,7 +96,15 @@ impl App {
             acked: Mutex::new(0),
             host_sockets: AtomicUsize::new(0),
             owner_sockets: AtomicUsize::new(0),
+            owner_tx: tokio::sync::broadcast::channel(256).0,
+            host_tx: tokio::sync::broadcast::channel(64).0,
         }))
+    }
+    pub fn add_host_socket(&self, d: isize) {
+        if d > 0 { self.host_sockets.fetch_add(1, Ordering::SeqCst) } else { self.host_sockets.fetch_sub(1, Ordering::SeqCst) };
+    }
+    pub fn add_owner_socket(&self, d: isize) {
+        if d > 0 { self.owner_sockets.fetch_add(1, Ordering::SeqCst) } else { self.owner_sockets.fetch_sub(1, Ordering::SeqCst) };
     }
     /// Open primary-host WebSockets (/api/host/stream).
     pub fn host_sockets(&self) -> usize {
@@ -130,6 +151,8 @@ pub struct Req {
     pub headers: HeaderMap,
     pub body: axum::body::Bytes,
     pub peer: Option<SocketAddr>,
+    /// The WebSocket upgrade, when the request asked for one (taken by the stream routes).
+    pub ws: Mutex<Option<axum::extract::ws::WebSocketUpgrade>>,
 }
 
 impl Req {

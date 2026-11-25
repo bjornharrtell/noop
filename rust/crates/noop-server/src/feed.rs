@@ -82,6 +82,7 @@ pub fn status_view(app: &App, c: &Connection) -> Value {
 pub fn to_inbox(app: &App, c: &Connection, item: Value) -> rusqlite::Result<()> {
     c.execute("INSERT INTO inbox (json) VALUES (?)", [item.to_string()])?;
     app.inbox_notify.notify_waiters();
+    let _ = app.host_tx.send(Arc::from(r#"{"type":"inbox"}"#));
     Ok(())
 }
 
@@ -340,12 +341,15 @@ pub fn routes(app: &Arc<App>, c: &Connection, req: &Req, w: &Who) -> rusqlite::R
             let b = req.json().unwrap_or(Value::Null);
             if let Some(status) = b.get("status").filter(|s| !is_falsy(s)) {
                 kv_set(c, "status", status)?;
-                // TODO(rust-port): MCP resources/updated noop://status, $status frames to ?v=2 owner sockets
+                // TODO(rust-port): MCP resources/updated noop://status
             }
             if let Some(settings) = b.get("settings").filter(|s| !is_falsy(s)) {
                 kv_set(c, "settings", settings)?;
             }
             touch_host(app, c)?;
+            if b.get("status").is_some_and(|s| !is_falsy(s)) {
+                crate::stream::push_status(app, c);
+            }
             // watchers: owner clients connected right now. With none, the primary skips live-activity-only refreshes.
             ok(json!({ "ok": true, "watchers": app.owner_sockets(), "level": "ok" }))
         }

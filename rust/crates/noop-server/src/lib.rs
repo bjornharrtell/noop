@@ -8,12 +8,14 @@ pub mod db;
 pub mod feed;
 pub mod files;
 pub mod mail;
+pub mod stream;
 pub mod web;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::ws::WebSocketUpgrade;
+use axum::extract::{ConnectInfo, FromRequestParts, Request, State};
 use axum::http::Method;
 use axum::response::Response;
 use axum::Router;
@@ -30,7 +32,9 @@ pub fn router(app: Arc<App>) -> Router {
 
 async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
     let peer = req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0);
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
+    let upgrade = parts.headers.get("upgrade").and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    let ws = if upgrade { WebSocketUpgrade::from_request_parts(&mut parts, &app).await.ok() } else { None };
     let Ok(body) = axum::body::to_bytes(body, MAX_BODY).await else { return err("request too large", 413) };
     let req = Req {
         method: parts.method,
@@ -39,6 +43,7 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
         headers: parts.headers,
         body,
         peer,
+        ws: std::sync::Mutex::new(ws),
     };
     match route(&app, &req).await {
         Ok(r) => r,
@@ -72,6 +77,9 @@ async fn route(app: &Arc<App>, req: &Req) -> rusqlite::Result<Response> {
         // waits without holding the database
         return feed::inbox(app, req).await;
     }
+    if p == "/api/stream" || p == "/api/host/stream" {
+        return Ok(stream::open(app, req, &w));
+    }
     let mut c = app.db();
     let machine = w == Who::Machine;
     if (p == "/api/files/list" || p == "/api/files/read") && req.method == Method::GET {
@@ -103,5 +111,10 @@ async fn route(app: &Arc<App>, req: &Req) -> rusqlite::Result<Response> {
 pub async fn serve(app: Arc<App>, addr: SocketAddr) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("noop-server listening on {addr}");
+    serve_on(app, listener).await
+}
+
+/// Serve on a bound listener (tests bind port 0).
+pub async fn serve_on(app: Arc<App>, listener: tokio::net::TcpListener) -> std::io::Result<()> {
     axum::serve(listener, router(app).into_make_service_with_connect_info::<SocketAddr>()).await
 }
