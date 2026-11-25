@@ -1,0 +1,94 @@
+//! Noop server: a self-hosted replacement for the Cloudflare Worker (cloud/src), same HTTP API.
+//!
+//! Ported so far: file sync (/api/files/*), owner sign-in (/api/auth/*), sessions, 2FA binding and the machine
+//! security routes (/api/host/2fa*, login-code, join, revoke-sessions). See rust/README.md for what is left.
+pub mod app;
+pub mod auth;
+pub mod db;
+pub mod files;
+pub mod mail;
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::extract::{ConnectInfo, Request, State};
+use axum::http::Method;
+use axum::response::Response;
+use axum::Router;
+
+use app::{err, App, Req};
+use auth::Who;
+
+/// Largest request body: a commit carries base64 files of up to 1.5 MB each.
+const MAX_BODY: usize = 100 * 1024 * 1024;
+
+pub fn router(app: Arc<App>) -> Router {
+    Router::new().fallback(handle).with_state(app)
+}
+
+async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
+    let peer = req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0);
+    let (parts, body) = req.into_parts();
+    let Ok(body) = axum::body::to_bytes(body, MAX_BODY).await else { return err("request too large", 413) };
+    let req = Req {
+        method: parts.method,
+        path: parts.uri.path().to_string(),
+        query: app::parse_query(parts.uri.query()),
+        headers: parts.headers,
+        body,
+        peer,
+    };
+    match route(&app, &req).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("{} {}: {e}", req.method, req.path);
+            err("internal error", 500)
+        }
+    }
+}
+
+async fn route(app: &Arc<App>, req: &Req) -> rusqlite::Result<Response> {
+    let p = req.path.as_str();
+    if !p.starts_with("/api/") && !p.starts_with("/media/") {
+        // TODO(rust-port): static web client (app/dist/web/noop), MCP (/mcp, /oauth/*, /.well-known/*)
+        return Ok(err("not found", 404));
+    }
+    if p.starts_with("/api/auth/") {
+        return auth::auth(app, req).await;
+    }
+    // TODO(rust-port): guest workers (/api/guest/join, guest tokens), /api/mcp-oauth/callback
+    let mut c = app.db();
+    let Some(w) = auth::who(app, &c, req)? else { return Ok(err("unauthorized", 401)) };
+    // a connector's OAuth token is for /mcp only: never the owner API
+    if matches!(w, Who::Session { mcp: true, .. }) {
+        return Ok(err("forbidden", 403));
+    }
+    let machine = w == Who::Machine;
+    if (p == "/api/files/list" || p == "/api/files/read") && req.method == Method::GET {
+        if let Some(r) = files::handle_read(&c, req)? {
+            return Ok(r);
+        }
+    }
+    if p.starts_with("/api/files/") {
+        let owner_only = p == "/api/files/history" || p == "/api/files/revert";
+        if if owner_only { machine } else { !machine } {
+            return Ok(err("forbidden", 403));
+        }
+        let actor = if machine { req.header("x-noop-host").unwrap_or("machine").to_string() } else { "owner".to_string() };
+        // TODO(rust-port): MCP resources/updated for changed tasks and decisions
+        if let Some(r) = files::handle(&mut c, req, &actor, app.now())? {
+            return Ok(r);
+        }
+    }
+    if let Some(r) = auth::host_routes(app, &c, req, &w)? {
+        return Ok(r);
+    }
+    Ok(err("not found", 404))
+}
+
+/// Serve until the process is stopped.
+pub async fn serve(app: Arc<App>, addr: SocketAddr) -> std::io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("noop-server listening on {addr}");
+    axum::serve(listener, router(app).into_make_service_with_connect_info::<SocketAddr>()).await
+}
