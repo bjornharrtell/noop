@@ -104,9 +104,8 @@ async fn main() {
         Some("backup") => {
             // a consistent copy while the server runs (WAL readers never block the writer)
             let Some(out) = args.get(2) else { fail("usage: noop-server backup <file>") };
-            let r = rusqlite::Connection::open(&db).and_then(|c| c.execute("VACUUM INTO ?", [out]).map(|_| ()));
-            if let Err(e) = r {
-                fail(format!("backup {db} → {out}: {e}"));
+            if let Err(e) = noop_server::ops::backup(&db, out) {
+                fail(e);
             }
             println!("{out}");
             return;

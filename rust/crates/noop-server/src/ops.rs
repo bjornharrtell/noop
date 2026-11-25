@@ -99,6 +99,24 @@ pub fn export_page(c: &Connection, table: &str, after: i64, limit: i64) -> rusql
     rows.collect()
 }
 
+/// Copy `db` to `out` while the server runs (WAL readers never block the writer).
+///
+/// `VACUUM INTO` refuses a file that exists, so the copy goes to a temporary name and is renamed over `out`: a backup
+/// that runs twice in one day (a manual run beside the timer, or a retry) succeeds instead of failing, and `out` is
+/// only ever replaced by a complete copy.
+pub fn backup(db: &str, out: &str) -> Result<(), String> {
+    let tmp = format!("{out}.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let r = rusqlite::Connection::open(db)
+        .and_then(|c| c.execute("VACUUM INTO ?", [&tmp]).map(|_| ()))
+        .map_err(|e| format!("backup {db} → {out}: {e}"));
+    if let Err(e) = r {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, out).map_err(|e| format!("backup {db} → {out}: {e}"))
+}
+
 /// Write rows into a table (columns checked against the table), in one transaction. Returns rows written.
 pub fn import_rows(c: &mut Connection, table: &str, rows: &[Value], reset: bool) -> Result<usize, String> {
     let known = tables(c).map_err(|e| e.to_string())?;

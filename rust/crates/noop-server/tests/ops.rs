@@ -91,6 +91,36 @@ async fn allow_list_gates_every_path() {
     assert_eq!(s, 403, "no client address: refused");
 }
 
+#[test]
+fn backup_succeeds_twice_in_one_day() {
+    // The nightly timer writes one file per day; a manual run or a retry on the same day used to fail because
+    // VACUUM INTO refuses an existing file.
+    let dir = std::env::temp_dir().join(format!("noop-backup-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("noop.db");
+    let out = dir.join("backup.db");
+    let (db, out) = (db.to_str().unwrap(), out.to_str().unwrap());
+
+    let c = rusqlite::Connection::open(db).unwrap();
+    noop_server::db::init(&c).unwrap();
+    c.execute("INSERT INTO kv (k, v) VALUES ('k', 'v')", []).unwrap();
+    drop(c);
+
+    noop_server::ops::backup(db, out).unwrap();
+    let first = std::fs::metadata(out).unwrap().len();
+    // the second run overwrites, and still produces a complete, readable copy
+    noop_server::ops::backup(db, out).unwrap();
+
+    let copy = rusqlite::Connection::open(out).unwrap();
+    let v: String = copy.query_row("SELECT v FROM kv WHERE k = 'k'", [], |r| r.get(0)).unwrap();
+    let ok: String = copy.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+    assert_eq!(v, "v");
+    assert_eq!(ok, "ok");
+    assert!(first > 0);
+    assert!(!std::path::Path::new(&format!("{out}.tmp")).exists(), "the temporary copy is gone");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[tokio::test]
 async fn usage_counts_requests() {
     let t = T::new();
