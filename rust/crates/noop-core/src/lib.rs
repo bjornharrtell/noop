@@ -2,6 +2,7 @@
 pub mod authcode;
 pub mod budget;
 pub mod paths;
+pub mod tools;
 pub mod totp;
 
 /// `encodeURIComponent`: everything but `A-Z a-z 0-9 - _ . ! ~ * ' ( )` is percent-encoded as UTF-8.

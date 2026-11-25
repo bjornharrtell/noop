@@ -1,7 +1,16 @@
 # Noop in Rust (work in progress)
 
 A Rust port of Noop's backends, for a small VPS instead of Cloudflare Workers. The HTTP API stays identical to the
-Worker's (`cloud/src`), so the existing apps and the TypeScript machine program can talk to this server unchanged.
+Worker's (`cloud/src`), so the web client and the TypeScript machine program can talk to this server unchanged.
+
+The only client is the web app: the NSH package built for the web target (WebAssembly), served by this server
+from `NOOP_WEB_DIR`. Owners open the server's address in a browser (and can add it to the home screen); no native
+desktop or mobile app is built or installed. Machines ("workers") run the machine program and only call the server.
+
+```bash
+app/build-web.sh                      # needs NSH; writes app/dist/web/noop
+NOOP_WEB_DIR=app/dist/web/noop ...    # the server serves it at /
+```
 
 | Crate | What |
 |---|---|
@@ -24,6 +33,7 @@ HUB_TOKEN=<machine key> HUB_OWNER_EMAIL=you@example.com NOOP_DB=/var/lib/noop/no
 | `NOOP_DB` | SQLite file (default `./noop.db`). |
 | `NOOP_LISTEN` | Listen address (default `127.0.0.1:8799`). Put a TLS proxy (Caddy) in front. |
 | `NOOP_CLIENT_IP_HEADER` | Header the proxy puts the client IP in (e.g. `x-forwarded-for`), for security alerts. |
+| `NOOP_WEB_DIR` | The web client package (`app/dist/web/noop`). Unknown paths get its `index.html`. |
 
 `HUB_ALLOW_IPS` is refused at startup until it is ported; restrict access at the firewall meanwhile.
 
@@ -41,20 +51,21 @@ Done:
 - `/api/files/*`: changes, commit (compare-and-swap), history, revert, list, read; history pruning.
 - `/api/auth/start|verify|logout`, sessions, idle expiry, daily failure lockout, security alerts (feed + SMTP).
 - `/api/host/2fa`, `/2fa/setup`, `/2fa/confirm`, `/login-code`, `/join`, `/revoke-sessions`.
+- Feed and inbox: `/api/events`, `/api/feed`, `/api/messages`, `/api/host/state`, `/api/host/inbox` (long-poll),
+  `/api/status`, `/api/settings`, `/api/fleet/update`, `/api/tasks*`, `/api/channels*`.
+- Web client at `/` from `NOOP_WEB_DIR`, precompressed `.br`/`.gz` for hashed assets, SPA fallback.
 
 To do, in order:
-1. Feed and inbox: `/api/events`, `/api/feed`, `/api/messages`, `/api/host/state`, `/api/host/inbox` (long-poll),
-   `/api/status`, `/api/settings`, `/api/fleet/update`, `/api/tasks*`, `/api/channels*` (needs `tools.ts`).
-2. WebSockets: `/api/stream` (owner, `?v=2` status frames), `/api/host/stream` (primary's inbox nudges).
-3. Media and uploads: `/api/media`, `/api/uploads`, `/media/<id>`, media pruning.
-4. Web Push (VAPID, `aes128gcm`), `/api/push/*`.
-5. Secrets (`/api/secrets*`), MCP OAuth client (`/api/mcp-oauth*`), guests (`/api/guest*`).
-6. MCP server and OAuth 2.1 provider (`/mcp`, `/oauth/*`, `/.well-known/*`).
-7. `/api/host/export|import`, `/api/usage`, `HUB_ALLOW_IPS`, static web client with precompressed assets.
-8. Deployment: systemd unit, Caddy example, backups (Litestream or nightly `.backup`).
+1. WebSockets: `/api/stream` (owner, `?v=2` status frames), `/api/host/stream` (primary's inbox nudges).
+2. Media and uploads: `/api/media`, `/api/uploads`, `/media/<id>`.
+3. Web Push (VAPID, `aes128gcm`), `/api/push/*` (the browser's notifications).
+4. Secrets (`/api/secrets*`), MCP OAuth client (`/api/mcp-oauth*`), guests (`/api/guest*`).
+5. MCP server and OAuth 2.1 provider (`/mcp`, `/oauth/*`, `/.well-known/*`).
+6. `/api/host/export|import`, `/api/usage`, `HUB_ALLOW_IPS`.
+7. Deployment: systemd unit, Caddy example, backups (Litestream or nightly `.backup`).
 
 Not ported on purpose: Cloudflare free-plan metering and shedding (`FREE`, `TARGET`, `LEAN`, `SHED`),
-`HUB_MOVED_TO`, Cloudflare Email Routing.
+`HUB_MOVED_TO`, Cloudflare Email Routing, `/api/updates/direct/*` (native app updates; there are no native apps).
 
 ## Machine program
 

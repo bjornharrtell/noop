@@ -1,6 +1,7 @@
 //! Server state, configuration and the small helpers every route uses.
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use axum::body::Body;
@@ -24,6 +25,8 @@ pub struct Config {
     pub en: bool,
     /// NOOP_CLIENT_IP_HEADER: header the reverse proxy puts the client address in (e.g. x-forwarded-for).
     pub client_ip_header: Option<String>,
+    /// NOOP_WEB_DIR: the web client package (`app/build-web.sh` output, app/dist/web/noop).
+    pub web_dir: Option<std::path::PathBuf>,
 }
 
 impl Config {
@@ -44,6 +47,7 @@ impl Config {
             smtp: smtp.filter(|s| !s.host.is_empty()),
             en: var("HUB_LANG").is_some_and(|l| l.to_lowercase().starts_with("en")),
             client_ip_header: var("NOOP_CLIENT_IP_HEADER").map(|h| h.to_lowercase()),
+            web_dir: var("NOOP_WEB_DIR").map(std::path::PathBuf::from),
         })
     }
 }
@@ -60,12 +64,34 @@ pub struct App {
     pub db: Mutex<Connection>,
     pub cfg: Config,
     clock: Clock,
+    /// Wakes long-polls of /api/host/inbox when an item arrives.
+    pub inbox_notify: tokio::sync::Notify,
+    /// The highest inbox seq the primary acknowledged.
+    pub acked: Mutex<i64>,
+    host_sockets: AtomicUsize,
+    owner_sockets: AtomicUsize,
 }
 
 impl App {
     pub fn new(conn: Connection, cfg: Config, clock: Option<Clock>) -> rusqlite::Result<Arc<App>> {
         crate::db::init(&conn)?;
-        Ok(Arc::new(App { db: Mutex::new(conn), cfg, clock: clock.unwrap_or_else(|| Arc::new(|| chrono::Utc::now().timestamp_millis())) }))
+        Ok(Arc::new(App {
+            db: Mutex::new(conn),
+            cfg,
+            clock: clock.unwrap_or_else(|| Arc::new(|| chrono::Utc::now().timestamp_millis())),
+            inbox_notify: tokio::sync::Notify::new(),
+            acked: Mutex::new(0),
+            host_sockets: AtomicUsize::new(0),
+            owner_sockets: AtomicUsize::new(0),
+        }))
+    }
+    /// Open primary-host WebSockets (/api/host/stream).
+    pub fn host_sockets(&self) -> usize {
+        self.host_sockets.load(Ordering::SeqCst)
+    }
+    /// Open owner WebSockets (/api/stream).
+    pub fn owner_sockets(&self) -> usize {
+        self.owner_sockets.load(Ordering::SeqCst)
     }
     pub fn now(&self) -> i64 {
         (self.clock)()

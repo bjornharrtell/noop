@@ -5,8 +5,10 @@
 pub mod app;
 pub mod auth;
 pub mod db;
+pub mod feed;
 pub mod files;
 pub mod mail;
+pub mod web;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -49,20 +51,28 @@ async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
 
 async fn route(app: &Arc<App>, req: &Req) -> rusqlite::Result<Response> {
     let p = req.path.as_str();
-    if !p.starts_with("/api/") && !p.starts_with("/media/") {
-        // TODO(rust-port): static web client (app/dist/web/noop), MCP (/mcp, /oauth/*, /.well-known/*)
+    let mcp = p == "/mcp" || p.starts_with("/oauth/") || p.starts_with("/.well-known/oauth-") || p == "/.well-known/openid-configuration";
+    if mcp {
+        // TODO(rust-port): MCP server and OAuth 2.1 provider
         return Ok(err("not found", 404));
+    }
+    if !p.starts_with("/api/") && !p.starts_with("/media/") {
+        return Ok(web::serve(app, req).await);
     }
     if p.starts_with("/api/auth/") {
         return auth::auth(app, req).await;
     }
     // TODO(rust-port): guest workers (/api/guest/join, guest tokens), /api/mcp-oauth/callback
-    let mut c = app.db();
-    let Some(w) = auth::who(app, &c, req)? else { return Ok(err("unauthorized", 401)) };
+    let Some(w) = auth::who(app, &app.db(), req)? else { return Ok(err("unauthorized", 401)) };
     // a connector's OAuth token is for /mcp only: never the owner API
     if matches!(w, Who::Session { mcp: true, .. }) {
         return Ok(err("forbidden", 403));
     }
+    if p == "/api/host/inbox" {
+        // waits without holding the database
+        return feed::inbox(app, req).await;
+    }
+    let mut c = app.db();
     let machine = w == Who::Machine;
     if (p == "/api/files/list" || p == "/api/files/read") && req.method == Method::GET {
         if let Some(r) = files::handle_read(&c, req)? {
@@ -81,6 +91,9 @@ async fn route(app: &Arc<App>, req: &Req) -> rusqlite::Result<Response> {
         }
     }
     if let Some(r) = auth::host_routes(app, &c, req, &w)? {
+        return Ok(r);
+    }
+    if let Some(r) = feed::routes(app, &c, req, &w)? {
         return Ok(r);
     }
     Ok(err("not found", 404))

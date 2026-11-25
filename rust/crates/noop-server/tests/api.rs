@@ -1,84 +1,11 @@
 //! API contract tests. The files part ports cloud/test/run.ts (same checks, same expected responses); the claim race
 //! uses concurrent commits instead of the TypeScript host code. The auth part covers sign-in with code + TOTP.
-use std::sync::atomic::{AtomicI64, Ordering};
+mod common;
+
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::Request;
-use base64::Engine;
-use http_body_util::BodyExt;
-use noop_server::app::{App, Config};
+use common::*;
 use serde_json::{json, Value};
-use tower::ServiceExt;
-
-const TOKEN: &str = "machine-token";
-const OWNER: &str = "owner@example.com";
-
-struct T {
-    app: Arc<App>,
-    clock: Arc<AtomicI64>,
-}
-
-fn b64(b: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(b)
-}
-fn unb64(s: &Value) -> Vec<u8> {
-    base64::engine::general_purpose::STANDARD.decode(s.as_str().unwrap()).unwrap()
-}
-
-impl T {
-    fn new() -> T {
-        let clock = Arc::new(AtomicI64::new(1_780_000_000_000));
-        let c2 = clock.clone();
-        let cfg = Config { hub_token: TOKEN.into(), owners: vec![OWNER.into()], en: true, ..Default::default() };
-        let app = App::new(rusqlite::Connection::open_in_memory().unwrap(), cfg, Some(Arc::new(move || c2.load(Ordering::SeqCst)))).unwrap();
-        T { app, clock }
-    }
-    async fn call(&self, method: &str, path: &str, auth: Option<&str>, body: Option<Value>) -> (u16, Value) {
-        let mut b = Request::builder().method(method).uri(path).header("x-noop-host", "run");
-        if let Some(a) = auth {
-            b = b.header("authorization", format!("Bearer {a}"));
-        }
-        let req = b.body(body.map(|v| Body::from(v.to_string())).unwrap_or_else(Body::empty)).unwrap();
-        let res = noop_server::router(self.app.clone()).oneshot(req).await.unwrap();
-        let status = res.status().as_u16();
-        let bytes = res.into_body().collect().await.unwrap().to_bytes();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
-    }
-    async fn machine(&self, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
-        self.call(method, path, Some(TOKEN), body).await
-    }
-    fn advance(&self, ms: i64) {
-        self.clock.fetch_add(ms, Ordering::SeqCst);
-    }
-    fn now(&self) -> i64 {
-        self.clock.load(Ordering::SeqCst)
-    }
-    /// Bind 2FA from a machine, sign in, and return (owner session, TOTP secret).
-    async fn sign_in(&self) -> (String, String) {
-        let (s, r) = self.machine("POST", "/api/host/2fa/setup", None).await;
-        assert_eq!(s, 200);
-        let secret = r["secret"].as_str().unwrap().to_string();
-        assert!(r["uri"].as_str().unwrap().starts_with("otpauth://totp/Noop%3Aowner%40example.com?secret="));
-        let (s, r) = self.machine("POST", "/api/host/2fa/confirm", Some(json!({ "totp": self.totp(&secret) }))).await;
-        assert_eq!((s, &r["replaced"]), (200, &json!(false)), "{r}");
-        self.advance(30_000); // the confirm used this step's code
-        let (s, r) = self.call("POST", "/api/auth/start", None, Some(json!({ "email": OWNER }))).await;
-        assert_eq!((s, &r["delivery"]), (200, &json!("cli")), "no SMTP: the code goes to `noop login`: {r}");
-        let (s, r) = self.machine("GET", "/api/host/login-code", None).await;
-        assert_eq!(s, 200);
-        let code = r["code"].as_str().unwrap().to_string();
-        let (s, r) = self
-            .call("POST", "/api/auth/verify", None, Some(json!({ "email": OWNER, "code": code.to_lowercase(), "totp": self.totp(&secret) })))
-            .await;
-        assert_eq!(s, 200, "{r}");
-        (r["session"].as_str().unwrap().to_string(), secret)
-    }
-    fn totp(&self, secret: &str) -> String {
-        let key = noop_core::totp::b32decode(secret).unwrap();
-        noop_core::totp::hotp(&key, noop_core::totp::step_at(self.now()) as u64)
-    }
-}
 
 #[tokio::test]
 async fn files_contract() {

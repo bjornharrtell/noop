@@ -99,5 +99,8 @@ pub fn append(app: &App, c: &Connection, e: Value) -> Value {
         // ~2% of appends, as the Worker did
         let _ = c.execute("DELETE FROM events WHERE seq <= (SELECT MAX(seq) - 5000 FROM events)", []);
     }
+    if let Err(e) = crate::feed::prune_media(app, c, false) {
+        tracing::error!("prune media: {e}");
+    }
     ev
 }
