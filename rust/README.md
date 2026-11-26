@@ -28,7 +28,14 @@ noop work [--once]                                         # claim the next task
 noop watch [--once]                                        # answer the owner's chat messages
 noop status                                                # server reachable, file counts, what is unsent
 sudo noop install-service --now                            # run the watch loop as a systemd service
+noop self-update [--force]                                 # newest release, checksum-verified, replaced atomically
 ```
+
+Before each work cycle the daemon queues the routines that are due (`[[routine]]` in `config.toml`: `every` is
+`15m`, `hourly`, `daily HH:MM`, `weekdays HH:MM` or `weekly MON HH:MM`, in UTC; a machine that was asleep catches up)
+and releases claims older than `fleet.reap_after_minutes`, so a machine that dies does not strand a task. Journals and
+logs written on two machines merge by line union instead of one side winning. A settings change from the app is merged
+into this machine's `config.toml` and shared.
 
 `noop watch` drains the server's inbox with a saved cursor, holding the request open up to 25 seconds when the inbox is
 empty, so an idle machine asks rarely. An owner message runs one Copilot session and the answer is posted back as a
@@ -45,8 +52,9 @@ server revision and each file's version. An edit this machine has not pushed yet
 is recorded, the local bytes stay, and the next `commit` sends them on top of it. A rejected commit (another machine
 wrote first) is retried the same way, so task claiming cannot silently overwrite a claim.
 
-Still to port from the TypeScript client: running the agents, the supervisor and routines, decisions and autonomy,
-service install, self-repair and self-update, and append-only merging of journals written on two machines.
+Still to port from the TypeScript client: the model-driven parts — the supervisor's verdicts, escalation cards and
+decisions, and the learning, usage-report and proposal routines. Their prompts are written for claude/codex and have to
+be rewritten for Copilot first.
 
 ### One Copilot session
 
