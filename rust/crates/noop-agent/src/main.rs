@@ -29,7 +29,7 @@ fn fail(msg: impl std::fmt::Display) -> ! {
     std::process::exit(1);
 }
 
-const USAGE: &str = "usage: noop <init <server url> --token <machine key> | pull | commit -m <message> | ask <prompt> | work [--once] | watch [--once] | install-service [--now] | uninstall-service | status | version>";
+const USAGE: &str = "usage: noop <init <server url> --token <machine key> | pull | commit -m <message> | ask <prompt> | work [--once] | watch [--once] | install-service [--now] | uninstall-service | self-update [--force] | status | version>";
 
 #[tokio::main]
 async fn main() {
@@ -68,6 +68,9 @@ async fn main() {
             match noop_agent::pull(&ctx).await {
                 Ok(p) => {
                     println!("pulled {} file(s), {} deleted (rev {})", p.written, p.deleted, p.rev);
+                    if p.merged > 0 {
+                        println!("merged {} journal/log file(s) written on two machines", p.merged);
+                    }
                     if p.kept > 0 {
                         println!("kept {} local edit(s) the server has newer versions of; push them with: noop commit -m …", p.kept);
                     }
@@ -148,6 +151,9 @@ async fn main() {
                         if s.answered > 0 {
                             println!("answered {} message(s), cursor {}", s.answered, s.after);
                         }
+                        if s.files {
+                            println!("shared files changed (settings, channel or cancel); pulled");
+                        }
                         if once {
                             break;
                         }
@@ -175,6 +181,21 @@ async fn main() {
             Ok(m) => println!("{m}"),
             Err(e) => fail(e),
         },
+        Some("self-update") => {
+            let force = args.iter().any(|a| a == "--force");
+            match noop_agent::update::run(&home, env!("CARGO_PKG_VERSION"), force).await {
+                Ok(noop_agent::update::Outcome::Current(v)) => println!("already on {v}"),
+                Ok(noop_agent::update::Outcome::Updated { from, to }) => {
+                    println!("updated {from} → {to}");
+                    if std::env::var("INVOCATION_ID").is_ok() {
+                        println!("running as a service: exit so systemd starts the new binary");
+                    } else {
+                        println!("start it again to use the new binary");
+                    }
+                }
+                Err(e) => fail(e),
+            }
+        }
         Some("status") => {
             let ctx = ctx(&home);
             match noop_agent::status(&ctx).await {

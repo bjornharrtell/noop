@@ -16,6 +16,8 @@ pub struct Step {
     pub answered: usize,
     /// Cursor after this drain, acknowledged to the server.
     pub after: i64,
+    /// A settings, channel or cancel item arrived, so the shared files were pulled again.
+    pub files: bool,
 }
 
 fn cursor_path(ctx: &Ctx) -> PathBuf {
@@ -41,7 +43,7 @@ fn save_cursor(ctx: &Ctx, after: i64) -> Result<(), String> {
 /// rarely instead of spinning.
 pub async fn step(ctx: &Ctx, host: &str, agent: &dyn Agent, wait_secs: u64) -> Result<Step, String> {
     let mut after = load_cursor(ctx);
-    let mut out = Step { answered: 0, after };
+    let mut out = Step { answered: 0, after, files: false };
     let (code, body) = ctx.call("GET", &format!("/api/host/inbox?after={after}&wait={}", wait_secs.min(25)), None).await?;
     if code != 200 {
         return Err(format!("inbox: server answered {code}"));
@@ -50,7 +52,22 @@ pub async fn step(ctx: &Ctx, host: &str, agent: &dyn Agent, wait_secs: u64) -> R
         if let Some(seq) = item.get("seq").and_then(|v| v.as_i64()) {
             after = after.max(seq);
         }
-        if item.get("type").and_then(|v| v.as_str()) != Some("message") {
+        let kind = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if kind != "message" {
+            match kind {
+                // the owner changed a setting: merge the patch into this machine's config.toml and share it
+                "settings" => {
+                    if let Some(patch) = item.get("patch") {
+                        if apply_settings(ctx, patch)? {
+                            crate::commit(ctx, "settings from the app").await?;
+                            out.files = true;
+                        }
+                    }
+                }
+                // a channel edit, a fleet update or a cancel is written to the shared files: pull them in
+                "channel" | "cancel" | "update" => out.files = true,
+                _ => {}
+            }
             continue;
         }
         let text = item
@@ -75,6 +92,9 @@ pub async fn step(ctx: &Ctx, host: &str, agent: &dyn Agent, wait_secs: u64) -> R
             Err(e) => journal(ctx, host, &format!("could not answer the owner: {}", first_line(&e))),
         }
     }
+    if out.files {
+        crate::pull(ctx).await?;
+    }
     save_cursor(ctx, after)?;
     out.after = after;
     Ok(out)
@@ -95,6 +115,67 @@ async fn reply(ctx: &Ctx, host: &str, text: &str) -> Result<(), String> {
     } else {
         Err(format!("reply: server answered {code}"))
     }
+}
+
+/// Merge a settings patch (JSON, nested) into `config.toml`. Returns whether anything changed.
+fn apply_settings(ctx: &Ctx, patch: &serde_json::Value) -> Result<bool, String> {
+    let path = ctx.mirror().join("config.toml");
+    let mut doc: toml::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| t.parse::<toml::Value>().ok())
+        .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+    if !merge_toml(&mut doc, patch) {
+        return Ok(false);
+    }
+    let text = toml::to_string_pretty(&doc).map_err(|e| format!("config.toml: {e}"))?;
+    std::fs::write(&path, text).map_err(|e| format!("config.toml: {e}"))?;
+    Ok(true)
+}
+
+/// Overlay JSON onto TOML, recursing into tables; returns whether a value actually changed.
+fn merge_toml(dst: &mut toml::Value, patch: &serde_json::Value) -> bool {
+    let Some(obj) = patch.as_object() else { return false };
+    if !dst.is_table() {
+        *dst = toml::Value::Table(toml::map::Map::new());
+    }
+    let table = dst.as_table_mut().expect("a table");
+    let mut changed = false;
+    for (k, v) in obj {
+        if v.is_null() {
+            changed |= table.remove(k).is_some();
+            continue;
+        }
+        if v.is_object() {
+            let entry = table.entry(k.clone()).or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+            changed |= merge_toml(entry, v);
+            continue;
+        }
+        let to = match v {
+            serde_json::Value::String(s) => Some(toml::Value::String(s.clone())),
+            serde_json::Value::Bool(b) => Some(toml::Value::Boolean(*b)),
+            serde_json::Value::Number(n) => n.as_i64().map(|i| toml::Value::Integer(i)).or_else(|| n.as_f64().map(toml::Value::Float)),
+            serde_json::Value::Array(a) => {
+                let items: Option<Vec<toml::Value>> = a
+                    .iter()
+                    .map(|x| match x {
+                        serde_json::Value::String(s) => Some(toml::Value::String(s.clone())),
+                        serde_json::Value::Bool(b) => Some(toml::Value::Boolean(*b)),
+                        serde_json::Value::Number(n) => n.as_i64().map(toml::Value::Integer),
+                        _ => None,
+                    })
+                    .collect();
+                items.map(toml::Value::Array)
+            }
+            _ => None,
+        };
+        if let Some(to) = to {
+            if table.get(k) != Some(&to) {
+                table.insert(k.clone(), to);
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 fn journal(ctx: &Ctx, host: &str, line: &str) {

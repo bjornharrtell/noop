@@ -1443,11 +1443,12 @@ dependencies = [
 
 [[package]]
 name = "noop-agent"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "copilot-sdk",
+ "flate2",
  "noop-core",
  "noop-server",
  "reqwest",
@@ -1455,13 +1456,14 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
  "tokio",
  "toml",
 ]
 
 [[package]]
 name = "noop-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1474,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "noop-server"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "aes-gcm",
  "axum",

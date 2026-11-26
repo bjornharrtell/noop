@@ -23,6 +23,8 @@ pub mod gates;
 
 pub mod work;
 pub mod bridge;
+pub mod merge;
+pub mod update;
 
 #[cfg(feature = "copilot")]
 pub mod copilot;
@@ -217,6 +219,8 @@ pub struct Pull {
     pub deleted: usize,
     /// Local edits that a remote version would have overwritten, kept in place for the next commit.
     pub kept: usize,
+    /// Append-only files where both sides added lines and the merge kept both.
+    pub merged: usize,
     /// Server revision reached.
     pub rev: i64,
 }
@@ -266,11 +270,22 @@ pub async fn pull(ctx: &Ctx) -> Result<Pull, String> {
             break;
         }
     }
-    // put back the local edits the remote versions just displaced; they are sent by the next commit
+    // put back the local edits the remote versions just displaced; they are sent by the next commit.
+    // A journal or log written on both machines is merged line by line instead of one side winning.
     for (path, bytes) in unsent {
-        if std::fs::read(ctx.mirror().join(&path)).ok().as_deref() != Some(&bytes[..]) {
-            write_atomic(&ctx.mirror().join(&path), &bytes)?;
-            out.kept += 1;
+        let remote = std::fs::read(ctx.mirror().join(&path)).ok();
+        if remote.as_deref() == Some(&bytes[..]) {
+            continue;
+        }
+        match remote.as_deref().and_then(|r| crate::merge::merge(&path, &bytes, r)) {
+            Some(merged) => {
+                write_atomic(&ctx.mirror().join(&path), &merged)?;
+                out.merged += 1;
+            }
+            None => {
+                write_atomic(&ctx.mirror().join(&path), &bytes)?;
+                out.kept += 1;
+            }
         }
     }
     save_state(ctx, &st)?;
