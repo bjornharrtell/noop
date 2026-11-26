@@ -28,6 +28,7 @@ pub mod update;
 pub mod routines;
 pub mod supervisor;
 pub mod decisions;
+pub mod heartbeat;
 
 #[cfg(feature = "copilot")]
 pub mod copilot;

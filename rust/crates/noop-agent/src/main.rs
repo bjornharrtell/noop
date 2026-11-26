@@ -249,11 +249,20 @@ async fn watch_forever(c: &noop_agent::Ctx, agent: &dyn noop_agent::work::Agent,
 /// Housekeeping, then one task at a time, forever (or until the queue is empty with `once`).
 #[cfg(feature = "copilot")]
 async fn work_forever(c: &noop_agent::Ctx, agent: &dyn noop_agent::work::Agent, host: &str, once: bool) {
+    let mut last_beat = 0i64;
     loop {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
+        // the app lists a machine only while it keeps reporting; once a minute is enough (the server calls it offline
+        // after three) and costs one request a minute
+        if now - last_beat > 60_000 {
+            match noop_agent::heartbeat::push(c, host, noop_agent::heartbeat::busy_count(c, host)).await {
+                Ok(()) => last_beat = now,
+                Err(e) => eprintln!("heartbeat: {e}"),
+            }
+        }
         match noop_agent::routines::queue(c, host, now).await {
             Ok(n) if n > 0 => {
                 let _ = noop_agent::commit(c, "routines").await;

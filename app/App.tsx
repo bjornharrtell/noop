@@ -5846,7 +5846,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
         backgroundColor: colors.background,
       }}
     >
-      <If when={!wide() && p.route === CHANNEL}>
+      {/* A phone has to reach the sidebar from every page, not just the chat: the drawer's edge swipe competes with the
+          browser's back gesture, so without this the machines and settings are unreachable on Android. */}
+      <If when={!wide()}>
         <IconButton icon="menu" label={L("Menu", "菜单")} onPress={() => drawer.set(true)} />
       </If>
       <If when={wide() && !sidebarOpen()}>
