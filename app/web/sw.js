@@ -27,6 +27,11 @@ const ASKS = ["decision", "menu", "proposals", "login"];
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 
+// Chrome only offers to install a web app whose service worker handles fetches. This one has no offline cache to serve
+// from, so the handler does nothing and the browser fetches as usual — but without it there is no install prompt on
+// Android, which is exactly what happened before it was added.
+self.addEventListener("fetch", () => {});
+
 self.addEventListener("push", (e) => {
   let p = {};
   try {
