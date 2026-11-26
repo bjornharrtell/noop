@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/noop-core", "crates/noop-server"]
+members = ["crates/noop-core", "crates/noop-server", "crates/noop-agent"]
 
 [workspace.package]
 edition = "2021"

@@ -56,6 +56,11 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/assets"
           tar -czf "$GITHUB_WORKSPACE/assets/noop-server-${{ matrix.arch }}-linux.tar.gz" -C "$RUNNER_TEMP/pkg" .
           "$RUNNER_TEMP/pkg/noop-server" version
+          # the machine program (noop): one binary per arch, for a machine to install without a toolchain
+          mkdir -p "$RUNNER_TEMP/agent"
+          cp target/release/noop "$RUNNER_TEMP/agent/"
+          tar -czf "$GITHUB_WORKSPACE/assets/noop-agent-${{ matrix.arch }}-linux.tar.gz" -C "$RUNNER_TEMP/agent" .
+          "$RUNNER_TEMP/agent/noop" version
       - uses: actions/upload-artifact@v4
         with:
           name: server-${{ matrix.arch }}

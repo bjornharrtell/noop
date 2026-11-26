@@ -16,6 +16,24 @@ NOOP_WEB_DIR=app/dist/web/noop ...    # the server serves it at /
 |---|---|
 | `crates/noop-core` | Logic shared by server and machine program (paths, TOTP, login codes, sync pacing). No I/O. |
 | `crates/noop-server` | The server: axum + one SQLite connection (WAL). Replaces the Worker and its Durable Object. |
+| `crates/noop-agent` | The machine program (`noop`): joins a fleet, mirrors the shared files, pushes local edits. Replaces the TypeScript client. |
+
+## The machine program (`noop`)
+
+```bash
+noop init https://noop.example.com --token <machine key>   # once: writes ~/.noop/noop.toml (mode 600) and pulls
+noop pull                                                  # fetch what other machines wrote
+noop commit -m "what changed"                              # send local edits
+noop status                                                # server reachable, file counts, what is unsent
+```
+
+The mirror is `~/.noop/data` (`NOOP_HOME` moves it); files are ordinary files, and `sync.json` beside it records the
+server revision and each file's version. An edit this machine has not pushed yet survives a `pull`: the remote version
+is recorded, the local bytes stay, and the next `commit` sends them on top of it. A rejected commit (another machine
+wrote first) is retried the same way, so task claiming cannot silently overwrite a claim.
+
+Still to port from the TypeScript client: running the agents, the supervisor and routines, decisions and autonomy,
+service install, self-repair and self-update, and append-only merging of journals written on two machines.
 
 ## Run
 

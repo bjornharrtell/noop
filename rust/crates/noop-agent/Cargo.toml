@@ -1,0 +1,20 @@
+[package]
+name = "noop-agent"
+version = "0.1.3"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+noop-core = { path = "../noop-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+base64 = "0.22"
+toml = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[dev-dependencies]
+noop-server = { path = "../noop-server" }
+rusqlite = { version = "0.43", features = ["bundled"] }
