@@ -1,6 +1,6 @@
 [package]
 name = "noop-agent"
-version = "0.1.4"
+version = "0.1.5"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 noop-core = { path = "../noop-core" }
+async-trait = { version = "0.1", optional = true }
+copilot-sdk = { version = "2.0.4-preview.2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -23,3 +25,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 [dev-dependencies]
 noop-server = { path = "../noop-server" }
 rusqlite = { version = "0.43", features = ["bundled"] }
+
+[features]
+default = ["copilot"]
+# the agent runner; `--no-default-features` builds a sync-only noop
+copilot = ["dep:copilot-sdk", "dep:async-trait"]

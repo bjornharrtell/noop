@@ -40,6 +40,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # the Copilot SDK links the OS OpenSSL 3 (it rejects vendored/static OpenSSL)
+      - name: OpenSSL for the agent runner
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq pkg-config libssl-dev
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust

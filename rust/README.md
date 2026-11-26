@@ -35,6 +35,22 @@ wrote first) is retried the same way, so task claiming cannot silently overwrite
 Still to port from the TypeScript client: running the agents, the supervisor and routines, decisions and autonomy,
 service install, self-repair and self-update, and append-only merging of journals written on two machines.
 
+### One Copilot session
+
+```bash
+copilot                       # once per machine: log in (it stores the credentials)
+noop ask "summarise reports/" # one GitHub Copilot run in the mirror, answer on stdout
+```
+
+The runner uses the official Rust SDK (`copilot-sdk`), so authentication is the machine's own `copilot` login. The model
+comes from `[agent] model` in `noop.toml` and defaults to `gpt-6-luna`; Copilot numbers its models itself, so if the
+account does not offer that one the run fails with the runtime's message and the setting picks another. Each prompt
+costs a premium request from the Copilot plan.
+
+Noop's blocks are enforced as the session's permission handler, not by trusting the runtime (the SDK hosts the agent
+in-process, with no sandbox): merging, releasing, publishing, force-pushing, deleting a repository, reading credentials,
+and writing outside the run's working directory are refused, and every refusal is reported.
+
 ## Run
 
 ```bash

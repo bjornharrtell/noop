@@ -15,6 +15,15 @@ use sha2::{Digest, Sha256};
 /// Bigger files are skipped: the server refuses them too, and a mirror is not a place for datasets.
 pub const MAX_FILE: usize = 1_500_000;
 
+/// Model a run uses unless `[agent] model` says otherwise. Copilot names its own models; if this one is not on the
+/// account's plan the run fails with the runtime's message and `[agent] model` picks another.
+pub const DEFAULT_MODEL: &str = "gpt-6-luna";
+
+pub mod gates;
+
+#[cfg(feature = "copilot")]
+pub mod copilot;
+
 /// Where a machine's mirror lives and how it reaches its server.
 #[derive(Debug, Clone)]
 pub struct Ctx {
@@ -336,6 +345,27 @@ struct ConfigFile {
     cloud: Option<CloudSection>,
     #[serde(default)]
     server: Option<ServerSection>,
+    #[serde(default)]
+    agent: Option<AgentSection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentSection {
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// The model runs use: `[agent] model` in `noop.toml`, else [`DEFAULT_MODEL`].
+pub fn read_model(home: &Path) -> String {
+    let p = std::env::var("HUB_CONF").map(PathBuf::from).unwrap_or_else(|_| home.join("noop.toml"));
+    std::fs::read_to_string(p)
+        .ok()
+        .and_then(|t| toml::from_str::<ConfigFile>(&t).ok())
+        .and_then(|c| c.agent)
+        .and_then(|a| a.model)
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
 }
 
 #[derive(Debug, Deserialize)]

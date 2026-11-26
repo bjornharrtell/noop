@@ -29,7 +29,7 @@ fn fail(msg: impl std::fmt::Display) -> ! {
     std::process::exit(1);
 }
 
-const USAGE: &str = "usage: noop <init <server url> --token <machine key> | pull | commit -m <message> | status | version>";
+const USAGE: &str = "usage: noop <init <server url> --token <machine key> | pull | commit -m <message> | ask <prompt> | status | version>";
 
 #[tokio::main]
 async fn main() {
@@ -87,6 +87,26 @@ async fn main() {
                 Err(e) => fail(e),
             }
         }
+        #[cfg(feature = "copilot")]
+        Some("ask") => {
+            let prompt = args[1..].join(" ");
+            if prompt.trim().is_empty() {
+                fail("usage: noop ask <prompt>  (runs one GitHub Copilot session in the mirror)");
+            }
+            let c = ctx(&home);
+            let model = noop_agent::read_model(&home);
+            match noop_agent::copilot::run(&prompt, &c.mirror(), Some(&model), std::time::Duration::from_secs(900)).await {
+                Ok(o) => {
+                    if !o.blocked.is_empty() {
+                        eprintln!("refused {} request(s): {}", o.blocked.len(), o.blocked.join("; "));
+                    }
+                    println!("{}", o.text.trim());
+                }
+                Err(e) => fail(e),
+            }
+        }
+        #[cfg(not(feature = "copilot"))]
+        Some("ask") => fail("this build has no agent runner (built with --no-default-features)"),
         Some("status") => {
             let ctx = ctx(&home);
             match noop_agent::status(&ctx).await {
