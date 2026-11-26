@@ -78,11 +78,13 @@ async function pushState() {
 export function createHost(player) {
   const title = typeof document === "undefined" ? "" : document.title || "noop";
   if (supported()) {
+    // Register on the first load, not only when notifications are switched on: Chrome offers to install a site only once
+    // a service worker with a fetch handler controls the page, and an iPhone needs the installed app for web push at
+    // all. Until this ran, a fresh visitor had no worker and therefore no install option.
+    sw().then((reg) => reg.update()).catch(() => {});
     navigator.serviceWorker.addEventListener("message", (e) => {
       if (e.data && e.data.type === "open") player.hostEvent("open", { ref: e.data.ref ?? null });
     });
-    // Keep the worker current (a new sw.js takes over at once: it skips waiting).
-    navigator.serviceWorker.getRegistration("./").then((reg) => reg && reg.update()).catch(() => {});
   }
   return {
     async call(name, args = {}) {
