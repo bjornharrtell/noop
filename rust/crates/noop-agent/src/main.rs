@@ -215,7 +215,9 @@ fn install_service(home: &Path, start: bool) -> Result<String, String> {
     if !PathBuf::from("/run/systemd/system").is_dir() {
         return Err("this machine does not run systemd; start it yourself: noop watch".into());
     }
-    let user = std::env::var("SUDO_USER").map_err(|_| "run it as root: sudo noop install-service")?;
+    let user = std::env::var("SUDO_USER").map_err(|_| {
+        "run it with sudo, as the user whose `copilot` login the runs use: sudo noop install-service".to_string()
+    })?;
     if user == "root" {
         return Err("log in to `copilot` as a normal user, then run: sudo noop install-service".into());
     }

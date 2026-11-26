@@ -25,8 +25,15 @@ noop init https://noop.example.com --token <machine key>   # once: writes ~/.noo
 noop pull                                                  # fetch what other machines wrote
 noop commit -m "what changed"                              # send local edits
 noop work [--once]                                         # claim the next task, run it, record the outcome
+noop watch [--once]                                        # answer the owner's chat messages
 noop status                                                # server reachable, file counts, what is unsent
+sudo noop install-service --now                            # run the watch loop as a systemd service
 ```
+
+`noop watch` drains the server's inbox with a saved cursor, holding the request open up to 25 seconds when the inbox is
+empty, so an idle machine asks rarely. An owner message runs one Copilot session and the answer is posted back as a
+`notice`, which is what the chat shows; a failure goes to the journal, never to the owner as a raw error. The service
+unit runs as the user whose `copilot` login the runs use.
 
 A task is a Markdown file with front matter in `tasks/inbox/`. Claiming moves it to `tasks/active/` and commits it
 once: the server's compare-and-swap is the lock, so of two machines that try at the same time exactly one wins and the
