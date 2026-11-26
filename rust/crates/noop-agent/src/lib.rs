@@ -236,6 +236,8 @@ pub struct Pull {
 pub async fn pull(ctx: &Ctx) -> Result<Pull, String> {
     let mut st = load_state(ctx);
     let mut out = Pull::default();
+    // the mirror exists even when the fleet has no files yet: agents run with it as their working directory
+    std::fs::create_dir_all(ctx.mirror()).map_err(|e| format!("{}: {e}", ctx.mirror().display()))?;
     // what this machine changed and has not sent yet, before anything from the server lands
     let unsent: Vec<(String, Vec<u8>)> = scan(ctx, &st)
         .into_iter()

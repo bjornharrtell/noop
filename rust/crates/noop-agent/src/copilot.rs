@@ -88,6 +88,10 @@ impl crate::work::Agent for Copilot {
 /// Run one prompt in `cwd` and return the assistant's answer.
 pub async fn run(prompt: &str, cwd: &Path, model: Option<&str>, timeout: Duration) -> Result<Outcome, String> {
     let program = copilot_cli()?;
+    // the session's working directory must exist before the runtime is asked for it
+    if !cwd.is_dir() {
+        std::fs::create_dir_all(cwd).map_err(|e| format!("cannot create the working directory {}: {e}", cwd.display()))?;
+    }
     let runtime = RuntimeConnection::SpawnedStdio(SpawnedProcessOptions {
         program: CliProgram::Path(program),
         working_directory: cwd.to_path_buf(),
@@ -95,7 +99,7 @@ pub async fn run(prompt: &str, cwd: &Path, model: Option<&str>, timeout: Duratio
     });
     let client = Client::start(ClientOptions::new(ClientMode::CodingAgent).with_runtime(runtime))
         .await
-        .map_err(|e| format!("copilot: {e} (is the `copilot` CLI logged in on this machine?)"))?;
+        .map_err(|e| format!("copilot could not start: {e}"))?;
 
     let blocked = Arc::new(Mutex::new(Vec::new()));
     let mut cfg = {

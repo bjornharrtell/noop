@@ -111,3 +111,16 @@ async fn a_wrong_key_is_refused() {
     assert_eq!(code, 401);
     std::fs::remove_dir_all(h).ok();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_fleet_still_gets_a_mirror_directory() {
+    // an agent runs with the mirror as its working directory, so it has to exist before any file does
+    let base = server().await;
+    let h = std::env::temp_dir().join(format!("noop-empty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&h);
+    let ctx = Ctx::new(&base, "machine-key", &h);
+    assert!(!ctx.mirror().is_dir(), "nothing has created it yet");
+    noop_agent::pull(&ctx).await.unwrap();
+    assert!(ctx.mirror().is_dir(), "pull creates the mirror even with nothing to copy");
+    std::fs::remove_dir_all(h).ok();
+}
