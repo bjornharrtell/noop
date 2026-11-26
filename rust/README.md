@@ -24,8 +24,14 @@ NOOP_WEB_DIR=app/dist/web/noop ...    # the server serves it at /
 noop init https://noop.example.com --token <machine key>   # once: writes ~/.noop/noop.toml (mode 600) and pulls
 noop pull                                                  # fetch what other machines wrote
 noop commit -m "what changed"                              # send local edits
+noop work [--once]                                         # claim the next task, run it, record the outcome
 noop status                                                # server reachable, file counts, what is unsent
 ```
+
+A task is a Markdown file with front matter in `tasks/inbox/`. Claiming moves it to `tasks/active/` and commits it
+once: the server's compare-and-swap is the lock, so of two machines that try at the same time exactly one wins and the
+other puts its copy back. A finished run writes `tasks/done/`, a journal line (in the same commit, so it reaches the
+other machines), and a feed event; a failed run releases the claim and records why.
 
 The mirror is `~/.noop/data` (`NOOP_HOME` moves it); files are ordinary files, and `sync.json` beside it records the
 server revision and each file's version. An edit this machine has not pushed yet survives a `pull`: the remote version
