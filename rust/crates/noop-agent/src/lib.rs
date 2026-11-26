@@ -312,21 +312,16 @@ pub async fn commit(ctx: &Ctx, msg: &str) -> Result<Commit, String> {
 
 // ------------------------------------------------------------------ status
 
-/// A short human summary: is the server answering, how many files each side has, what is unsent.
+/// A short human summary: is the server answering, what the mirror holds, what is unsent.
 pub async fn status(ctx: &Ctx) -> Result<String, String> {
     let (code, body) = ctx.call("GET", "/api/status", None).await?;
     if code != 200 {
         return Err(format!("server {}: {code} {}", ctx.url, str_of(body.get("error"))));
     }
-    let remote = match ctx.call("GET", "/api/files/list", None).await? {
-        (200, b) => b.get("files").and_then(|v| v.as_array()).map(|a| a.len().to_string()).unwrap_or_else(|| "?".into()),
-        (c, _) => format!("unavailable ({c})"),
-    };
     let st = load_state(ctx);
     let pending = scan(ctx, &st).len();
     let mut lines = vec![
         format!("server: {} (ok)", ctx.url),
-        format!("remote files: {remote}"),
         format!("mirror: {} ({} files tracked, rev {})", ctx.mirror().display(), st.files.len(), st.since),
     ];
     lines.push(if pending == 0 { "pending: nothing to push".into() } else { format!("pending: {pending} change(s) to push") });
