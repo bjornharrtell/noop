@@ -143,22 +143,25 @@ fn next_id(ctx: &Ctx) -> String {
 }
 
 /// Create the tasks for every routine that is due on this machine. Returns how many were queued.
-pub fn queue(ctx: &Ctx, host: &str, now_ms: i64) -> Result<usize, String> {
+///
+/// Who runs it: `scheduler = "each"` on every machine (each has its own copy, pinned to it), a host name on that
+/// machine, and `primary` on `[fleet] primary` when that is set. Whatever the setting, the run itself is claimed with a
+/// compare-and-swap commit, so two machines ticking at the same second cannot queue the same routine twice.
+pub async fn queue(ctx: &Ctx, host: &str, now_ms: i64) -> Result<usize, String> {
     let routines = read_routines(ctx);
     if routines.is_empty() {
         return Ok(0);
     }
+    let primary = primary_host(ctx);
     let mut st = load_state(ctx);
     let mut queued = 0;
-    let mut id = next_id(ctx);
     for r in routines {
         if !r.enabled || r.name.is_empty() {
             continue;
         }
-        // who generates the task: the primary machine, every machine, or one named machine
         let mine = match r.scheduler.as_str() {
             "each" => true,
-            "primary" => true,
+            "primary" => primary.as_deref().map(|p| p == host).unwrap_or(true),
             other => other == host,
         };
         if !mine || !due(&r.every, st.get(&r.name).copied(), now_ms) {
@@ -168,28 +171,51 @@ pub fn queue(ctx: &Ctx, host: &str, now_ms: i64) -> Result<usize, String> {
             st.insert(r.name.clone(), now_ms);
             continue;
         }
+        // claim this run; a machine that loses the commit leaves the routine to the winner
+        let marker = ctx.mirror().join(format!("routines/{}.md", r.name));
+        let mut meta = BTreeMap::new();
+        meta.insert("ran".to_string(), crate::work::today());
+        meta.insert("by".to_string(), host.to_string());
+        write_doc(&marker, &meta, &format!("last run by {host}\n"))?;
+        if crate::commit_once(ctx, &format!("routine {} ran", r.name)).await?.is_none() {
+            crate::pull(ctx).await?;
+            st.insert(r.name.clone(), now_ms);
+            save_state(ctx, &st)?;
+            continue;
+        }
         if r.kind == "usage-report" {
             // computed from the files, like the TypeScript client's usage routine: no task, no model request
             write_usage_report(ctx)?;
+            crate::commit(ctx, "usage report").await?;
             st.insert(r.name.clone(), now_ms);
             continue;
         }
-        let mut meta = BTreeMap::new();
-        meta.insert("id".to_string(), id.clone());
-        meta.insert("title".to_string(), format!("{} · {}", r.title, host));
-        meta.insert("priority".to_string(), r.priority.clone());
-        meta.insert("source".to_string(), format!("routine:{}", r.name));
-        meta.insert("created".to_string(), crate::work::today());
+        let id = next_id(ctx);
+        let mut tmeta = BTreeMap::new();
+        tmeta.insert("id".to_string(), id.clone());
+        tmeta.insert("title".to_string(), format!("{} · {}", r.title, host));
+        tmeta.insert("priority".to_string(), r.priority.clone());
+        tmeta.insert("source".to_string(), format!("routine:{}", r.name));
+        tmeta.insert("created".to_string(), crate::work::today());
         if !r.agent.is_empty() {
-            meta.insert("agent".to_string(), r.agent.clone());
+            tmeta.insert("agent".to_string(), r.agent.clone());
         }
-        write_doc(&ctx.mirror().join(format!("tasks/inbox/{id}.md")), &meta, &r.prompt)?;
+        write_doc(&ctx.mirror().join(format!("tasks/inbox/{id}.md")), &tmeta, &r.prompt)?;
+        crate::commit(ctx, &format!("routine {}", r.name)).await?;
         st.insert(r.name.clone(), now_ms);
-        id = format!("T-{:04}", id.trim_start_matches("T-").parse::<u32>().unwrap_or(0) + 1);
         queued += 1;
     }
     save_state(ctx, &st)?;
     Ok(queued)
+}
+
+/// `[fleet] primary`, when config.toml names one.
+fn primary_host(ctx: &Ctx) -> Option<String> {
+    std::fs::read_to_string(ctx.mirror().join("config.toml"))
+        .ok()
+        .and_then(|t| t.parse::<toml::Value>().ok())
+        .and_then(|d| d.get("fleet")?.get("primary")?.as_str().map(str::to_string))
+        .filter(|p| !p.is_empty())
 }
 
 fn path_is_file(p: &std::path::Path) -> bool {

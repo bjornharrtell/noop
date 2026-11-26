@@ -254,7 +254,7 @@ async fn work_forever(c: &noop_agent::Ctx, agent: &dyn noop_agent::work::Agent, 
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        match noop_agent::routines::queue(c, host, now) {
+        match noop_agent::routines::queue(c, host, now).await {
             Ok(n) if n > 0 => {
                 let _ = noop_agent::commit(c, "routines").await;
                 println!("queued {n} routine task(s)");
