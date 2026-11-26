@@ -139,7 +139,7 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
 pub fn ignored(rel: &str) -> bool {
     let first = rel.split('/').next().unwrap_or("");
     let name = rel.rsplit('/').next().unwrap_or("");
-    if first == ".git" || first == "logs" || rel == "config.local.toml" {
+    if first == ".git" || first.starts_with(".git.bak") || first == "logs" || first == "locks" || rel == "config.local.toml" {
         return true;
     }
     rel.split('/').any(|p| p == ".git")
@@ -206,13 +206,16 @@ pub fn scan(ctx: &Ctx, st: &State) -> Vec<Change> {
             hash: Some(hash),
         });
     }
+    // deletions first: the server numbers revs in the order they arrive, so `x/y` is gone everywhere before `x` is
+    // written as a file (a file replaced by a directory of the same name, or the other way round)
+    let mut gone = Vec::new();
     for (rel, k) in &st.files {
-        let gone = !ctx.mirror().join(rel).is_file();
-        if gone {
-            out.push(Change { path: rel.clone(), base_version: k.version, content: None, deleted: Some(true), hash: None });
+        if !ctx.mirror().join(rel).is_file() {
+            gone.push(Change { path: rel.clone(), base_version: k.version, content: None, deleted: Some(true), hash: None });
         }
     }
-    out
+    gone.append(&mut out);
+    gone
 }
 
 // ------------------------------------------------------------------ pull
@@ -257,7 +260,9 @@ pub async fn pull(ctx: &Ctx) -> Result<Pull, String> {
                 continue;
             }
             if f.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false) {
-                if std::fs::remove_file(ctx.mirror().join(&path)).is_ok() {
+                // the path may now be a directory here (x/y existed, x is gone): leave the directory, it has contents
+                let local = ctx.mirror().join(&path);
+                if !local.is_dir() && std::fs::remove_file(&local).is_ok() {
                     out.deleted += 1;
                 }
                 st.files.remove(&path);
@@ -266,7 +271,12 @@ pub async fn pull(ctx: &Ctx) -> Result<Pull, String> {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(str_of(f.get("content")))
                 .map_err(|e| format!("pull {path}: {e}"))?;
-            write_atomic(&ctx.mirror().join(&path), &bytes)?;
+            // x was a directory here and is a file now: drop the empty directory, or fail on a non-empty one
+            let local = ctx.mirror().join(&path);
+            if local.is_dir() {
+                std::fs::remove_dir(&local).map_err(|e| format!("pull {path}: a directory is in the way ({e})"))?;
+            }
+            write_atomic(&local, &bytes)?;
             st.files.insert(path, FileState { version: num(f.get("version")), hash: str_of(f.get("hash")).to_string() });
             out.written += 1;
         }
@@ -464,7 +474,7 @@ mod tests {
 
     #[test]
     fn ignored_paths() {
-        for p in [".git/config", "logs/a.md", "config.local.toml", "a/b.tmp", "a/.DS_Store", "a/x~", "#a#"] {
+        for p in [".git/config", "logs/a.md", "locks/cargo/x", "config.local.toml", "a/b.tmp", "a/.DS_Store", "a/x~", "#a#"] {
             assert!(ignored(p), "{p}");
         }
         for p in ["memory/a.md", "tasks/inbox/T-1.md", "a/b.gitkeep"] {

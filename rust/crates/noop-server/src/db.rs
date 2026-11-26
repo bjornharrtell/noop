@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS mcp_oauth_pending (state TEXT PRIMARY KEY, name TEXT,
 CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, content BLOB, hash TEXT, version INTEGER NOT NULL,
   updated TEXT, by TEXT, deleted INTEGER NOT NULL DEFAULT 0, rev INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS files_rev ON files (rev);
+-- Directory listings (path range AND deleted = 0) walk the live rows only. On the primary key they also read every
+-- tombstone in the range: every task move leaves one in the folder it left, so a cold listing bills tens of thousands
+-- of rows upstream (1ac7e6a).
+CREATE INDEX IF NOT EXISTS files_live ON files (path) WHERE deleted = 0;
 CREATE TABLE IF NOT EXISTS history (seq INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, version INTEGER, hash TEXT,
   content BLOB, ts TEXT, by TEXT, msg TEXT);
 CREATE INDEX IF NOT EXISTS history_path ON history (path, version);

@@ -62,13 +62,66 @@ pub fn read_routines(ctx: &Ctx) -> Vec<Routine> {
         .collect()
 }
 
+/// Interval schedules in minutes (`15m`, `2h`, `1d`, `hourly`), or None for a clock schedule.
+pub fn interval_minutes(every: &str) -> Option<i64> {
+    let s = every.trim();
+    if s == "hourly" {
+        return Some(60);
+    }
+    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
+    if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let n: i64 = num.parse().ok()?;
+    match unit {
+        "m" => Some(n),
+        "h" => Some(n * 60),
+        "d" => Some(n * 1440),
+        _ => None,
+    }
+}
+
+/// Whether `due` understands the schedule at all. An unknown one (`1hr`, a typo) is never due, so a routine with it would
+/// stop silently: upstream had three routines dead for two weeks because `1h` and `1d` were read as clock times.
+pub fn valid_every(every: &str) -> bool {
+    if every.trim().is_empty() {
+        return false;
+    }
+    if interval_minutes(every).is_some() {
+        return true;
+    }
+    let parts: Vec<&str> = every.split_whitespace().collect();
+    let clock = |s: &str| {
+        let Some((h, m)) = s.split_once(':') else { return false };
+        !h.is_empty()
+            && h.len() <= 2
+            && m.len() == 2
+            && h.chars().all(|c| c.is_ascii_digit())
+            && m.chars().all(|c| c.is_ascii_digit())
+            && h.parse::<u32>().map(|h| h < 24).unwrap_or(false)
+            && m.parse::<u32>().map(|m| m < 60).unwrap_or(false)
+    };
+    match parts.len() {
+        2 => clock(parts[1]) && (parts[0] == "daily" || parts[0] == "weekdays"),
+        3 => {
+            clock(parts[2])
+                && parts[0] == "weekly"
+                && ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
+                    .iter()
+                    .any(|d| parts[1].to_uppercase().starts_with(d))
+        }
+        _ => false,
+    }
+}
+
 /// Whether a routine is due, given when it last ran. Ported from `due` in src/cli.ts.
 pub fn due(every: &str, last_ms: Option<i64>, now_ms: i64) -> bool {
     let parts: Vec<&str> = every.split_whitespace().collect();
-    let Some(&first) = parts.first() else { return false };
-    if first == "hourly" || (first.len() > 1 && first.ends_with('m') && first[..first.len() - 1].chars().all(|c| c.is_ascii_digit())) {
-        let mins: i64 = if first == "hourly" { 60 } else { first[..first.len() - 1].parse().unwrap_or(60) };
+    if let Some(mins) = interval_minutes(every) {
         return last_ms.is_none_or(|l| now_ms - l >= mins * 60_000);
+    }
+    if !valid_every(every) {
+        return false;
     }
     let Some(hm) = parts.last() else { return false };
     let (h, m) = match hm.split_once(':') {
@@ -82,7 +135,7 @@ pub fn due(every: &str, last_ms: Option<i64>, now_ms: i64) -> bool {
         target -= DAY;
     }
     let weekday = |ms: i64| ((ms / DAY) + 4) % 7; // 1970-01-01 was a Thursday
-    let on_schedule = |ms: i64| match first {
+    let on_schedule = |ms: i64| match parts[0] {
         "weekdays" => weekday(ms) != 0 && weekday(ms) != 6,
         "weekly" => {
             let want = parts.get(1).map(|d| d.to_uppercase()).unwrap_or_default();
@@ -102,6 +155,20 @@ pub fn due(every: &str, last_ms: Option<i64>, now_ms: i64) -> bool {
         None => now_ms - target < 60 * 60_000,
         Some(l) => l < target,
     }
+}
+
+fn journal(ctx: &Ctx, host: &str, text: &str) {
+    let day = crate::work::today();
+    let path = ctx.mirror().join("journal").join(format!("{day}.md"));
+    let mut doc = std::fs::read_to_string(&path).unwrap_or_else(|_| format!("# {day}\n\n"));
+    if !doc.ends_with('\n') {
+        doc.push('\n');
+    }
+    doc.push_str(&format!("- {} `{host}` {text}\n", crate::work::hhmm()));
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, doc);
 }
 
 fn state_path(ctx: &Ctx) -> PathBuf {
@@ -164,7 +231,28 @@ pub async fn queue(ctx: &Ctx, host: &str, now_ms: i64) -> Result<usize, String> 
             "primary" => primary.as_deref().map(|p| p == host).unwrap_or(true),
             other => other == host,
         };
-        if !mine || !due(&r.every, st.get(&r.name).copied(), now_ms) {
+        if !mine {
+            continue;
+        }
+        if !valid_every(&r.every) {
+            // never due; say so once per bad value instead of leaving the routine silently dead
+            let key = format!("{}#invalid", r.name);
+            let stamp = r.every.bytes().fold(0i64, |h, b| h.wrapping_mul(31).wrapping_add(b as i64));
+            if st.get(&key) != Some(&stamp) {
+                st.insert(key, stamp);
+                journal(
+                    ctx,
+                    host,
+                    &format!(
+                        "⚠️ routine `{}` has an unknown schedule \"{}\" and will not run; use 15m, 2h, 1d, hourly, daily HH:MM, weekdays HH:MM or weekly MON HH:MM",
+                        r.name, r.every
+                    ),
+                );
+            }
+            continue;
+        }
+        st.remove(&format!("{}#invalid", r.name));
+        if !due(&r.every, st.get(&r.name).copied(), now_ms) {
             continue;
         }
         if already_queued(ctx, &r.name) {
@@ -210,7 +298,7 @@ pub async fn queue(ctx: &Ctx, host: &str, now_ms: i64) -> Result<usize, String> 
 }
 
 /// `[fleet] primary`, when config.toml names one.
-fn primary_host(ctx: &Ctx) -> Option<String> {
+pub fn primary_host(ctx: &Ctx) -> Option<String> {
     std::fs::read_to_string(ctx.mirror().join("config.toml"))
         .ok()
         .and_then(|t| t.parse::<toml::Value>().ok())
@@ -264,6 +352,28 @@ mod tests {
         assert!(!due("hourly", Some(now() - 10 * 60_000), now()));
         assert!(due("15m", Some(now() - 16 * 60_000), now()));
         assert!(!due("15m", Some(now() - 5 * 60_000), now()));
+    }
+
+    #[test]
+    fn hour_and_day_intervals_run() {
+        // upstream: `1h` and `1d` were parsed as clock times, so three routines never ran again
+        assert!(due("1h", Some(now() - 61 * 60_000), now()));
+        assert!(!due("1h", Some(now() - 30 * 60_000), now()));
+        assert!(due("2h", Some(now() - 121 * 60_000), now()));
+        assert!(due("1d", Some(now() - DAY - 60_000), now()));
+        assert!(!due("1d", Some(now() - 60_000), now()));
+        assert!(due("1h", None, now()));
+    }
+
+    #[test]
+    fn only_known_schedules_are_valid() {
+        for ok in ["15m", "2h", "1d", "hourly", "daily 09:00", "weekdays 07:30", "weekly MON 09:00"] {
+            assert!(valid_every(ok), "{ok} should be valid");
+        }
+        for bad in ["", "1hr", "daily", "daily 9:0", "weekly 09:00", "weekly FUNDAY 09:00", "monthly 1 09:00", "24:00 daily"] {
+            assert!(!valid_every(bad), "{bad} should be rejected");
+        }
+        assert!(!due("1hr", None, now()), "an unknown schedule is never due");
     }
 
     #[test]

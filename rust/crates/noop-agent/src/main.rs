@@ -272,11 +272,17 @@ async fn work_forever(c: &noop_agent::Ctx, agent: &dyn noop_agent::work::Agent, 
             Err(e) => eprintln!("routines: {e}"),
         }
         match noop_agent::supervisor::reap(c, host, now) {
-            Ok(n) if n > 0 => {
-                let _ = noop_agent::commit(c, "release stale claims").await;
-                println!("released {n} stale claim(s)");
+            Ok((released, dropped)) => {
+                if released > 0 || dropped > 0 {
+                    let _ = noop_agent::commit(c, "release stale claims").await;
+                    if released > 0 {
+                        println!("released {released} stale claim(s)");
+                    }
+                    if dropped > 0 {
+                        println!("dropped {dropped} stale claim(s) of tasks already queued again");
+                    }
+                }
             }
-            Ok(_) => {}
             Err(e) => eprintln!("supervisor: {e}"),
         }
         match noop_agent::work::work_once(c, host, agent).await {

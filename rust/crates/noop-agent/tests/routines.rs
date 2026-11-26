@@ -98,3 +98,24 @@ async fn a_disabled_routine_never_fires() {
     assert_eq!(routines::queue(&ctx, "host-a", NOW).await.unwrap(), 0);
     std::fs::remove_dir_all(h).ok();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_schedule_is_reported_once() {
+    // upstream: a routine with "1hr" was silently dead; it has to say so in the journal instead
+    let base = server().await;
+    let h = home("e", &CONFIG.replace("daily 09:00", "1hr"));
+    let ctx = Ctx::new(&base, "k", &h);
+    assert_eq!(routines::queue(&ctx, "host-a", NOW).await.unwrap(), 0, "it never runs");
+
+    let day = noop_agent::work::today();
+    let journal = std::fs::read_to_string(ctx.mirror().join(format!("journal/{day}.md"))).unwrap_or_default();
+    assert!(journal.contains("unknown schedule"), "the journal says why: {journal}");
+    assert!(journal.contains("1hr"), "{journal}");
+
+    // a second tick does not repeat it
+    assert_eq!(routines::queue(&ctx, "host-a", NOW + 60_000).await.unwrap(), 0);
+    let again = std::fs::read_to_string(ctx.mirror().join(format!("journal/{day}.md"))).unwrap_or_default();
+    assert_eq!(again.matches("unknown schedule").count(), 1, "reported once, not every tick");
+
+    std::fs::remove_dir_all(h).ok();
+}

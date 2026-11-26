@@ -34,12 +34,14 @@ pub fn parse_stamp(s: &str) -> Option<i64> {
     Some(((days * 24 + hh) * 60 + mm) * 60_000)
 }
 
-/// Move claims older than `reap_after_minutes` back to the inbox. Returns how many were released.
-pub fn reap(ctx: &Ctx, host: &str, now_ms: i64) -> Result<usize, String> {
+/// Move claims older than `reap_after_minutes` back to the inbox, and drop stale claims of tasks that are queued again.
+/// Returns (released, dropped).
+pub fn reap(ctx: &Ctx, host: &str, now_ms: i64) -> Result<(usize, usize), String> {
     let limit = reap_after_minutes(ctx).max(1) * 60_000;
     let dir = ctx.mirror().join("tasks/active");
-    let Ok(rd) = std::fs::read_dir(&dir) else { return Ok(0) };
+    let Ok(rd) = std::fs::read_dir(&dir) else { return Ok((0, 0)) };
     let mut released = 0;
+    let mut dropped = 0;
     for entry in rd.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
@@ -59,6 +61,14 @@ pub fn reap(ctx: &Ctx, host: &str, now_ms: i64) -> Result<usize, String> {
         if id.is_empty() {
             continue;
         }
+        // The task is queued again already (a failed run or a crash put it back): this active copy is a stale claim,
+        // restored from the server by an earlier pull. Requeueing it would overwrite the queued copy and reset its
+        // failure count, so a task could retry forever — upstream saw 69 such lines in one day.
+        if ctx.mirror().join(format!("tasks/inbox/{id}.md")).is_file() {
+            std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            dropped += 1;
+            continue;
+        }
         let mut meta: BTreeMap<String, String> = doc.meta.clone();
         meta.remove("claimed_by");
         meta.remove("started");
@@ -67,7 +77,7 @@ pub fn reap(ctx: &Ctx, host: &str, now_ms: i64) -> Result<usize, String> {
         std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         released += 1;
     }
-    Ok(released)
+    Ok((released, dropped))
 }
 
 #[cfg(test)]
@@ -99,6 +109,28 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_claim_of_a_queued_task_is_dropped() {
+        // upstream (7e14ce6): requeueing over the queued copy resets its attempt and stall counters, so a task could
+        // retry forever; the stale active copy has to go instead
+        let h = home("b");
+        let ctx = Ctx::new("http://x", "k", &h);
+        let now = parse_stamp("2026-11-26T12:00:00Z").unwrap();
+        claim(&ctx, "T-0001", "2026-11-26T09:00:00Z");
+        let mut meta = BTreeMap::new();
+        meta.insert("id".into(), "T-0001".into());
+        meta.insert("failures".into(), "3".into());
+        write_doc(&ctx.mirror().join("tasks/inbox/T-0001.md"), &meta, "work").unwrap();
+
+        let (released, dropped) = reap(&ctx, "host-b", now).unwrap();
+        assert_eq!((released, dropped), (0, 1), "dropped, not requeued");
+        assert!(!ctx.mirror().join("tasks/active/T-0001.md").exists());
+        let queued = read_doc(&ctx.mirror().join("tasks/inbox/T-0001.md")).unwrap();
+        assert_eq!(queued.meta.get("failures").map(String::as_str), Some("3"), "the queued copy keeps its count");
+
+        std::fs::remove_dir_all(h).ok();
+    }
+
+    #[test]
     fn a_stale_claim_goes_back_and_a_fresh_one_stays() {
         let h = home("a");
         let ctx = Ctx::new("http://x", "k", &h);
@@ -106,8 +138,8 @@ mod tests {
         claim(&ctx, "T-0001", "2026-11-26T09:00:00Z");
         claim(&ctx, "T-0002", "2026-11-26T11:55:00Z");
 
-        let released = reap(&ctx, "host-b", now).unwrap();
-        assert_eq!(released, 1);
+        let (released, dropped) = reap(&ctx, "host-b", now).unwrap();
+        assert_eq!((released, dropped), (1, 0));
         assert!(ctx.mirror().join("tasks/inbox/T-0001.md").is_file());
         assert!(!ctx.mirror().join("tasks/active/T-0001.md").exists());
         assert!(ctx.mirror().join("tasks/active/T-0002.md").is_file(), "the fresh claim stays");

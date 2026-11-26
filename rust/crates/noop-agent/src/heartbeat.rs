@@ -26,6 +26,14 @@ fn load_ratio() -> f64 {
     (load / cores.max(1.0) * 100.0).round() / 100.0
 }
 
+/// `[fleet] primary` names the primary machine; with none named, this machine is it (only the primary serves the API).
+fn is_primary(ctx: &Ctx, host: &str) -> bool {
+    match crate::routines::primary_host(ctx) {
+        Some(p) => p == host,
+        None => true,
+    }
+}
+
 /// The status object the app renders.
 pub fn status(ctx: &Ctx, host: &str, busy: usize) -> serde_json::Value {
     let decisions: Vec<serde_json::Value> = crate::decisions::open(ctx)
@@ -59,6 +67,8 @@ pub fn status(ctx: &Ctx, host: &str, busy: usize) -> serde_json::Value {
             "host": host,
             "online": true,
             "busy": busy,
+            // the app marks the primary machine wherever it lists machines
+            "primary": is_primary(ctx, host),
             "last_seen": crate::work::today(),
             "code": env!("CARGO_PKG_VERSION"),
             "stats": { "loadRatio": load_ratio() },

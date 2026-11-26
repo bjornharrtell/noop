@@ -103,12 +103,22 @@ pub fn apply_cas(c: &mut Connection, items: &[Prepared], actor: &str, msg: &str,
         }
         let version = r.as_ref().map_or(0, |r| r.version) + 1;
         rev += 1;
-        tx.execute(
-            "INSERT INTO files (path, content, hash, version, updated, by, deleted, rev) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(path) DO UPDATE SET content = excluded.content, hash = excluded.hash, version = excluded.version,
-               updated = excluded.updated, by = excluded.by, deleted = excluded.deleted, rev = excluded.rev",
-            params![it.path, it.content, it.hash, version, ts, actor, it.content.is_none() as i64, rev],
-        )?;
+        // A live path rewritten in place leaves path and deleted alone, so files_live (index rows are billed upstream) is
+        // not rewritten either: most writes — heartbeats, journals — touch no index row, and only a path created or
+        // deleted, which is a task move, does (1ac7e6a).
+        if it.content.is_some() && live_version(&r) > 0 {
+            tx.execute(
+                "UPDATE files SET content = ?, hash = ?, version = ?, updated = ?, by = ?, rev = ? WHERE path = ?",
+                params![it.content, it.hash, version, ts, actor, rev, it.path],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO files (path, content, hash, version, updated, by, deleted, rev) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(path) DO UPDATE SET content = excluded.content, hash = excluded.hash, version = excluded.version,
+                   updated = excluded.updated, by = excluded.by, deleted = excluded.deleted, rev = excluded.rev",
+                params![it.path, it.content, it.hash, version, ts, actor, it.content.is_none() as i64, rev],
+            )?;
+        }
         if !latest_only(&it.path) {
             tx.execute(
                 "INSERT INTO history (path, version, hash, content, ts, by, msg) VALUES (?, ?, ?, ?, ?, ?, ?)",

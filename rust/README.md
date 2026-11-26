@@ -60,6 +60,35 @@ Still to port from the TypeScript client: the model-driven parts — the supervi
 decisions, and the learning, usage-report and proposal routines. Their prompts are written for claude/codex and have to
 be rewritten for Copilot first.
 
+### Where this port came from
+
+`rust/` was written against **`54263a0c`** of [huacnlee/noop](https://github.com/huacnlee/noop) — *ci: Key the NSH
+cache by runner image (#389)* — by reading that revision: the Worker in `cloud/`, the daemon in `src/`, and the tests. The
+TypeScript daemon and Worker are superseded by `crates/noop-agent` and `crates/noop-server`; the app in `app/`, the site
+in `website/` and the deploy files still ship as upstream writes them.
+
+Upstream was reviewed at **`2fa1a9b`** (*app: Update phones over the air and add Check for updates (#419)*), 29 commits
+after the base, and merged into this branch: `app/App.tsx` was the only file both sides had touched and it merged
+cleanly, so the rebuilt web client now carries those 29 commits' client work (channel history, phone updates, the
+primary-machine mark, the IP allow-list editor, dictation). Three of our own client changes survive it: the `fetch`
+handler in `app/web/sw.js` (Chrome's install requirement) and the always-there menu button in `app/App.tsx`.
+
+Behavior was ported from these commits, with a test each:
+
+| upstream | what it fixed | here |
+|---|---|---|
+| `ebcb58b` | `every = "1h"` / `"1d"` were read as clock times, so three routines were dead for two weeks; an unknown schedule is now reported once instead of failing silently | `routines::interval_minutes`, `valid_every`, the journal warning |
+| `7e14ce6` | a stale claim requeued over an already-queued copy reset its failure count, so a task could retry forever | `supervisor::reap` drops the stale copy instead |
+| `98f120d` | `locks/` synced between machines; deletions had to land before writes; `x` ↔ `x/y` flips | `lib.rs`: `ignored`, deletion-first `scan`, directory handling in `pull` |
+| `1ac7e6a` | directory listings read every tombstone; rewrites rewrote index rows | `files_live` partial index, update-in-place in `apply_cas` |
+| `7dcdcf3` | the app marks the primary machine wherever machines are listed | `primary` in the heartbeat's host entry |
+| `8595025` | channel-started results were routed back into the channel | nothing to do: this server never tagged them |
+
+Not ported, deliberately: NsMetry analytics (`edf00e8`, `40ac254`, an external service), task grading (`95573f4`,
+`87d24be`, `46596d3`, `68bd950`, `06f0c44`, model-driven and not designed for Copilot), the Windows service and installer
+(`921b366`, `cf1a4c7`, `f0a3c93`, the agent is Linux systemd only), Claude and Codex login and quota handling
+(`fde5837`, `c7bda32`, `c4665ca`, `7200b9c`; the agent runs Copilot), and per-repo worktrees (`9145f41`).
+
 ### One Copilot session
 
 ```bash
