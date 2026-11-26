@@ -141,9 +141,25 @@ pub async fn work_once(ctx: &Ctx, host: &str, agent: &dyn Agent) -> Result<Optio
             meta.insert("failed".into(), e.clone());
             meta.remove("claimed_by");
             meta.remove("started");
+            // a task that keeps failing stops looping and asks the owner how to go on
+            let failures: u32 = meta.get("failures").and_then(|n| n.parse().ok()).unwrap_or(0) + 1;
+            meta.insert("failures".into(), failures.to_string());
             write_doc(&tasks_dir(ctx, "inbox").join(format!("{id}.md")), &meta, &doc.body)?;
-            crate::commit(ctx, &format!("[{host}] {id} failed: {}", first_line(&e))).await?;
-            event(ctx, host, &format!("{id} failed: {}", first_line(&e))).await?;
+            let msg = format!("[{host}] {id} failed: {}", first_line(&e));
+            if failures >= 2 {
+                let question = format!("{id} keeps failing after {failures} runs: {}", first_line(&e));
+                let card = crate::decisions::open_card(
+                    ctx,
+                    &meta,
+                    &question,
+                    &["A: retry once more", "B: change the approach", "C: drop it"],
+                    meta.get("agent").map(String::as_str).unwrap_or(""),
+                    &format!("{}\n\n## Failure\n{e}\n", doc.body.trim()),
+                )?;
+                event_kind(ctx, host, "decision", &format!("{id}: {question} ({})", card.id)).await?;
+            }
+            crate::commit(ctx, &msg).await?;
+            event(ctx, host, &msg).await?;
             return Err(e);
         }
     };
@@ -175,7 +191,12 @@ fn journal(ctx: &Ctx, host: &str, line: &str) {
 
 /// A feed event, so the owner sees the result without asking.
 async fn event(ctx: &Ctx, host: &str, text: &str) -> Result<(), String> {
-    let body = serde_json::json!({ "from": host, "kind": "result", "text": text });
+    event_kind(ctx, host, "result", text).await
+}
+
+/// A feed event of a given kind (`result`, `decision`, `notice`).
+async fn event_kind(ctx: &Ctx, host: &str, kind: &str, text: &str) -> Result<(), String> {
+    let body = serde_json::json!({ "from": host, "kind": kind, "text": text });
     let (code, _) = ctx.call("POST", "/api/events", Some(body)).await?;
     if code == 200 {
         Ok(())

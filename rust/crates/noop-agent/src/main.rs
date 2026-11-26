@@ -29,7 +29,7 @@ fn fail(msg: impl std::fmt::Display) -> ! {
     std::process::exit(1);
 }
 
-const USAGE: &str = "usage: noop <init <server url> --token <machine key> | pull | commit -m <message> | ask <prompt> | work [--once] | watch [--once] | install-service [--now] | uninstall-service | self-update [--force] | status | version>";
+const USAGE: &str = "usage: noop <init <server url> --token <machine key> | pull | commit -m <message> | ask <prompt> | work [--once] | watch [--once] | decide <D-0001> <answer> | install-service [--now] | uninstall-service | self-update [--force] | status | version>";
 
 #[tokio::main]
 async fn main() {
@@ -202,6 +202,22 @@ async fn main() {
             Ok(m) => println!("{m}"),
             Err(e) => fail(e),
         },
+        Some("decide") => {
+            // answering from a shell until the app has a route for it
+            let (Some(id), Some(answer)) = (args.get(1), args.get(2)) else {
+                fail("usage: noop decide <D-0001> <answer>")
+            };
+            let c = ctx(&home);
+            let who = std::env::var("SUDO_USER").unwrap_or_else(|_| hostname());
+            match noop_agent::decisions::answer(&c, id, answer, &format!("owner ({who})"), "") {
+                Ok(true) => match noop_agent::commit(&c, &format!("answer {id}")).await {
+                    Ok(_) => println!("answered {id}: {answer}"),
+                    Err(e) => fail(e),
+                },
+                Ok(false) => fail(format!("{id} is not open")),
+                Err(e) => fail(e),
+            }
+        }
         Some("self-update") => {
             let force = args.iter().any(|a| a == "--force");
             match noop_agent::update::run(&home, env!("CARGO_PKG_VERSION"), force).await {

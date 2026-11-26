@@ -27,6 +27,7 @@ pub mod merge;
 pub mod update;
 pub mod routines;
 pub mod supervisor;
+pub mod decisions;
 
 #[cfg(feature = "copilot")]
 pub mod copilot;

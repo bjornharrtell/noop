@@ -21,6 +21,8 @@ pub struct Routine {
     pub title: String,
     pub prompt: String,
     pub enabled: bool,
+    /// `task` (default) or `usage-report`, which writes a report from the files and spends no model request.
+    pub kind: String,
 }
 
 /// Parse `[[routine]]` entries out of `config.toml`.
@@ -52,6 +54,10 @@ pub fn read_routines(ctx: &Ctx) -> Vec<Routine> {
                 if p.is_empty() { s(t, "desc") } else { p }
             },
             enabled: t.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+            kind: {
+                let v = s(t, "kind");
+                if v.is_empty() { "task".into() } else { v }
+            },
         })
         .collect()
 }
@@ -172,6 +178,12 @@ pub fn queue(ctx: &Ctx, host: &str, now_ms: i64) -> Result<usize, String> {
             st.insert(r.name.clone(), now_ms);
             continue;
         }
+        if r.kind == "usage-report" {
+            // computed from the files, like the TypeScript client's usage routine: no task, no model request
+            write_usage_report(ctx)?;
+            st.insert(r.name.clone(), now_ms);
+            continue;
+        }
         let mut meta = BTreeMap::new();
         meta.insert("id".to_string(), id.clone());
         meta.insert("title".to_string(), format!("{} · {}", r.title, host));
@@ -188,6 +200,35 @@ pub fn queue(ctx: &Ctx, host: &str, now_ms: i64) -> Result<usize, String> {
     }
     save_state(ctx, &st)?;
     Ok(queued)
+}
+
+fn path_is_file(p: &std::path::Path) -> bool {
+    p.is_file()
+}
+
+/// How many tasks sit in each part of the queue, and how many cards wait: the weekly usage report.
+pub fn usage_report(ctx: &Ctx) -> String {
+    let count = |dir: &str| -> usize {
+        std::fs::read_dir(ctx.mirror().join("tasks").join(dir))
+            .map(|rd| rd.flatten().filter(|e| path_is_file(&e.path())).count())
+            .unwrap_or(0)
+    };
+    let cards = std::fs::read_dir(ctx.mirror().join("decisions/open")).map(|rd| rd.flatten().count()).unwrap_or(0);
+    let journals = std::fs::read_dir(ctx.mirror().join("journal")).map(|rd| rd.flatten().count()).unwrap_or(0);
+    format!(
+        "# Usage {}\n\n| | |\n|---|---|\n| tasks waiting | {} |\n| tasks running | {} |\n| tasks done | {} |\n| decisions waiting for you | {} |\n| journal days | {} |\n",
+        crate::work::today(),
+        count("inbox"),
+        count("active"),
+        count("done"),
+        cards,
+        journals
+    )
+}
+
+fn write_usage_report(ctx: &Ctx) -> Result<(), String> {
+    let path = ctx.mirror().join(format!("reports/usage/{}.md", crate::work::today()));
+    crate::work::write_doc(&path, &BTreeMap::new(), &usage_report(ctx))
 }
 
 #[cfg(test)]
