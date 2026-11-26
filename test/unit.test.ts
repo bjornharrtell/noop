@@ -2,10 +2,11 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkpointFallback, checkpointRecoveryBody, due, recordRunLimit } from "../src/cli";
+import { checkpointFallback, checkpointRecoveryBody, due, recordRunLimit, validEvery, waitProgressIsNew } from "../src/cli";
 import { matches, signature, type Cfg } from "../src/core";
 import { dirtyPaths } from "../src/setup";
 import { RUN_LIMIT, cliCommand, deadlinePrompt, parseResult, runAgent, runLimits, stripImages } from "../src/runner";
+import { shellBash } from "../src/shell";
 import { tooManyWakes } from "../src/waits";
 
 test("dirtyPaths keeps every path intact, including the first line", () => {
@@ -24,6 +25,25 @@ test("routine schedule", () => {  const t = new Date("2026-11-02T19:05:00"); // 
   expect(due("weekly FRI 17:00", undefined, t)).toBe(false);
   expect(due("daily 20:00", undefined, t)).toBe(false);
   expect(due("daily 02:30", undefined, t)).toBe(false); // first run long after slot → wait for next slot
+});
+
+test("routine schedule accepts hour and day intervals", () => {
+  const t = new Date("2026-11-26T14:00:00");
+  // "1h" / "1d" came from settings and were read as a clock time, so these routines never ran (T-11413).
+  expect(due("1h", undefined, t)).toBe(true);
+  expect(due("1h", "2026-11-26T13:30:00", t)).toBe(false);
+  expect(due("1h", "2026-11-26T12:59:00", t)).toBe(true);
+  expect(due("1d", "2026-11-25T15:00:00", t)).toBe(false);
+  expect(due("1d", "2026-11-25T13:59:00", t)).toBe(true);
+  expect(due("2h", "2026-11-26T12:30:00", t)).toBe(false);
+});
+
+test("routine schedule validation", () => {
+  for (const ok of ["15m", "60m", "1h", "1d", "hourly", "daily 09:00", "weekdays 19:00", "weekly MON 10:30", "weekly sun 9:05"])
+    expect(validEvery(ok)).toBe(true);
+  for (const bad of [undefined, "", "1hr", "daily", "daily 25:00", "weekly 10:30", "weekly XYZ 10:30", "every 1h"])
+    expect(validEvery(bad)).toBe(false);
+  expect(due("1hr", undefined, new Date())).toBe(false);
 });
 
 test("routine schedule catches up a slot missed while the machine slept", () => {
@@ -403,7 +423,7 @@ test("a result block survives a later turn from a background task notification",
     { type: "result", result: '```json\n{"status":"done","summary":"tested"}\n```' },
     { type: "result", result: "that notification changes nothing" },
   ].map((l) => JSON.stringify(l)).join("\n");
-  const cfg = { clis: { fake: { command: ["sh", "-c", 'printf "%s\\n" "$1"', "stream-json", lines] } } } as unknown as Cfg;
+  const cfg = { clis: { fake: { command: [shellBash(), "-c", 'printf "%s\\n" "$1"', "stream-json", lines] } } } as unknown as Cfg;
   const log = `${tmpdir()}/noop-run-${process.pid}.log`;
   const res = parseResult(await runAgent("fake", "", tmpdir(), cfg, log));
   rmSync(log, { force: true });
@@ -699,11 +719,40 @@ test("Codex keeps the completed result before an empty hook turn and ignores too
     { type: "item.completed", item: { type: "agent_message", text: "" } },
     { type: "turn.completed" },
   ].map((e) => JSON.stringify(e)).join("\n");
-  const cfg = { clis: { codex: { command: ["sh", "-c", 'printf "%s\\n" "$1"', "--json", lines] } } } as unknown as Cfg;
+  const cfg = { clis: { codex: { command: [shellBash(), "-c", 'printf "%s\\n" "$1"', "--json", lines] } } } as unknown as Cfg;
   const log = `${tmpdir()}/noop-codex-${process.pid}.log`;
   try {
     expect(parseResult(await runAgent("codex", "", tmpdir(), cfg, log))).toMatchObject({ status: "done", summary: "captured" });
     expect(parseResult(codexMessages(lines))).toMatchObject({ status: "done", summary: "captured" });
+  } finally { rmSync(log, { force: true }); }
+});
+
+test("a Codex workspace credit error reaches classify instead of looking like a missing result", async () => {
+  // T-0455: stdout was error/turn.failed ("out of credits") and stderr was only models-manager timeouts.
+  // Assistant-text-only extraction left classify with the timeouts, so the account was not cooled down,
+  // the run was "no result block", and the medic was woken.
+  const { classify } = await import("../src/accounts");
+  const { codexMessages } = await import("../src/codex-output");
+  const message = "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.";
+  const lines = [
+    { type: "thread.started", thread_id: "01a217db-206d-7400-9887-b0254ecf4d52" },
+    { type: "turn.started" },
+    { type: "error", message },
+    { type: "turn.failed", error: { message } },
+  ].map((e) => JSON.stringify(e)).join("\n");
+  const stderr = "2026-11-26T12:36:11.380112Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out";
+  const cfg = { clis: { codex: { command: [shellBash(), "-c", 'printf "%s\\n" "$1"; printf "%s\\n" "$2" >&2; exit 1', "--json", lines, stderr] } } } as unknown as Cfg;
+  const log = `${tmpdir()}/noop-codex-credits-${process.pid}.log`;
+  try {
+    const out = await runAgent("codex", "", tmpdir(), cfg, log);
+    expect(out).toContain(`ERROR: ${message}`);
+    expect(out.match(/out of credits/g)?.length).toBe(1); // error and turn.failed are one wall
+    expect(out).toContain("failed to refresh available models");
+    expect(classify(out)).toBe("quota");
+    expect(parseResult(out).summary).toContain("agent returned no result block");
+    expect(codexMessages(lines)).toBe(`ERROR: ${message}`);
+    // a real reply still wins when a turn error is absent, and tool output stays ignored
+    expect(classify("tests failed: 3 of 40\n" + stderr)).toBeNull();
   } finally { rmSync(log, { force: true }); }
 });
 
@@ -850,4 +899,12 @@ test("pasted long text attachments are inlined for the chat brain", async () => 
   expect(text).toContain("第二点：改图标");
   expect(text).toContain(`- ${md}`);
   rmSync(root, { recursive: true, force: true });
+});
+
+test("a parked run reports progress to the chat once per new summary", () => {
+  expect(waitProgressIsNew({}, { summary: "Fixed the click; PR #514 pushed", waiting_on: "CI" })).toBe(true);
+  expect(waitProgressIsNew({ wait_note: "Fixed the click; PR #514 pushed" }, { summary: "Fixed the click; PR #514 pushed ", waiting_on: "CI" })).toBe(false);
+  expect(waitProgressIsNew({ wait_note: "old" }, { summary: "CI green, merge card next", waiting_on: "owner" })).toBe(true);
+  expect(waitProgressIsNew({}, { summary: "", waiting_on: "CI" })).toBe(false);
+  expect(waitProgressIsNew({}, checkpointFallback("T-1", "/tmp/r.log"))).toBe(false);
 });

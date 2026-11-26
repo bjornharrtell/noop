@@ -26,7 +26,7 @@ const status = {
   decisions: [{ id: "D-0001", kind: "decision", question: "要不要升级依赖？", held: true }],
   recent: [{ id: "T-0005", title: "修复登录页", agent: "dev", host: "linux-box", state: "done", finished: ts(30), updated: ts(30) }],
   hosts: [{
-    host: "linux-box", caps: ["os:linux", "arch:x64", "cli:claude"], seen: ts(59), busy: 1,
+    host: "linux-box", caps: ["os:linux", "arch:x64", "cli:claude"], primary: true, seen: ts(59), busy: 1,
     stats: { loadRatio: 0.42, cores: 8, memFreePct: 40, diskFreeGB: 120, diskFreePct: 60 },
     os: "linux", arch: "x64", lan: "192.168.1.20", clis: ["claude"], accounts: [{ cli: "claude", name: "default", state: "ok" }],
     running: [{ id: "T-0007", title: "截图检查 gallery", agent: "dev", started: ts(50) }],
@@ -956,10 +956,12 @@ describe("channel", () => {
     expect(app.shows("c1cc085")).toBe(true);
     await app.waitFor("id:lan-linux-box");
     expect(app.shows("192.168.1.20")).toBe(true);
+    expect(app.count("id:primary-linux-box")).toBe(1); // marked on its page, not in the sidebar
     await app.press("id:user-menu");
     await app.press("id:settings");
     await app.press("id:settings-tab-version");
     await app.waitFor("id:version-linux-box");
+    await app.waitFor("id:primary-linux-box");
     app.onDialog((d) => (d.title === "Update all machines?" ? "Cancel" : null));
     await app.press("id:update-fleet");
     await app.waitUntil(() => app.dialogs().length === 1);
@@ -1507,7 +1509,7 @@ describe("team settings", () => {
 
   test("sets a machine's task priority", async () => {
     const puts: unknown[] = [];
-    let view = { current: {} as Record<string, unknown>, effective: { agents: [], autonomy: "onboarding", routines: [], max_parallel: 2, hosts: [{ host: "mini", priority: 0 }] }, options: { clis: [], autonomy: [] } };
+    let view = { current: {} as Record<string, unknown>, effective: { agents: [], autonomy: "onboarding", routines: [], max_parallel: 2, hosts: [{ host: "mini", priority: 0, primary: true }, { host: "box", priority: 0 }] }, options: { clis: [], autonomy: [] } };
     const app = await open("./App.tsx", {
       storage: STORAGE, width: 1200, height: 800, platform: "macos",
       network: {
@@ -1516,7 +1518,7 @@ describe("team settings", () => {
         [`PUT ${URL}/api/settings`]: (r: { body?: string | null }) => {
           const p = JSON.parse(r.body!);
           puts.push(p);
-          view = { ...view, effective: { ...view.effective, hosts: [{ host: "mini", priority: p.fleet.host_priority.mini }] } };
+          view = { ...view, effective: { ...view.effective, hosts: [{ host: "mini", priority: p.fleet.host_priority.mini, primary: true }, { host: "box", priority: 0 }] } };
           return { body: view };
         },
       },
@@ -1525,6 +1527,8 @@ describe("team settings", () => {
     await app.press("id:settings");
     await app.press("id:settings-tab-parallel");
     await app.waitFor("text:Machine priority");
+    await app.waitFor("id:primary-mini"); // the primary is marked, the other machine is not
+    expect(app.count("id:primary-box")).toBe(0);
     await app.press("id:priority-mini-inc");
     await app.press("id:priority-mini-inc");
     expect(puts).toEqual([]); // clicks stay a draft
@@ -1787,6 +1791,18 @@ describe("voice input", () => {
     await app.fake("nsh-extra/speech", "end", ["not-allowed"]);
     await app.waitFor("id:attach-note");
     expect(app.shows("text:/No microphone or speech recognition permission/")).toBe(true);
+    expect(app.shows("label:Stop voice input")).toBe(false);
+  });
+
+  test("in a browser, a refused microphone points to the browser settings", async () => {
+    const app = await open("./App.tsx", { storage: { ...STORAGE, "hub.notifyAsked": "1" }, network: hub([]), width: 1200, height: 800, platform: "web" });
+    await app.waitFor("label:Voice input");
+    await app.press("label:Voice input");
+    await app.waitFor("label:Stop voice input");
+    await app.fake("nsh-extra/speech", "end", ["not-allowed"]);
+    await app.waitFor("id:attach-note");
+    expect(app.shows("text:/Allow the microphone in your browser settings/")).toBe(true);
+    expect(app.shows("text:/System Settings/")).toBe(false);
     expect(app.shows("label:Stop voice input")).toBe(false);
   });
 
@@ -2283,6 +2299,49 @@ describe("commands", () => {
     await app.press("id:claude-key-ANTHROPIC_API_KEY");
     await app.waitFor("text:Replace API Key");
   });
+
+  test("settings edits the IP allow-list as a draft and saves it once", async () => {
+    const posts: { text: string; reply_to?: string }[] = [], puts: any[] = [], updates = { n: 0 };
+    const sent: any[] = [];
+    let live = ["203.0.113.7", "198.51.100.0/24"];
+    const view = () => ({ entries: live.map((value) => ({ value, mine: value === "203.0.113.7" })), on: true, ip: "203.0.113.7", machines: [], pending: null });
+    const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "macos", network: {
+      ...server(posts, puts, updates),
+      [`GET ${URL}/api/allow-ips`]: () => ({ body: view() }),
+      [`PUT ${URL}/api/allow-ips`]: (r: { body?: string | null }) => {
+        const b = JSON.parse(r.body!); sent.push(b);
+        if (!b.entries.includes("203.0.113.7")) return { status: 400, body: { error: "would lock you out", code: "self", ips: ["203.0.113.7"] } };
+        live = b.entries;
+        return { body: view() };
+      },
+    } });
+    await app.press("id:user-menu");
+    await app.press("id:settings");
+    await app.press("id:settings-tab-account");
+    await app.waitFor("id:allow-row-198.51.100.0/24");
+    await app.waitFor("text:This device");
+    // nothing goes out until Save
+    await app.press("id:allow-remove-198.51.100.0/24");
+    await app.press("id:allow-add");
+    await app.waitFor("id:allow-editor");
+    await app.type("id:allow-entry", "not-an-ip");
+    await app.press("id:allow-confirm");
+    await app.waitFor("id:allow-entry-note");
+    await app.clear("id:allow-entry");
+    await app.type("id:allow-entry", "192.220.47.149");
+    await app.press("id:allow-confirm");
+    await app.waitFor("id:allow-row-192.220.47.149");
+    expect(sent.length).toBe(0);
+    await app.press("id:allow-save");
+    await app.waitUntil(() => sent.length === 1);
+    expect(sent[0]).toEqual({ entries: ["203.0.113.7", "192.220.47.149"], force: false });
+    await app.waitUntil(() => app.count("id:allow-row-198.51.100.0/24") === 0);
+    // removing this device's own entry is refused by the server, and the reason stays on screen
+    await app.press("id:allow-remove-203.0.113.7");
+    await app.press("id:allow-save");
+    await app.waitFor("id:allow-note");
+    expect(app.shows("text:would lock you out")).toBe(true);
+  });
 });
 
 
@@ -2322,6 +2381,29 @@ test("channels share per-message read state with main chat, and Menu can mark al
   await app.press("id:mark-all-read");
   await app.waitUntil(() => { const raw = app.storage()[`hub.read:${URL}`]; return !!raw && !!JSON.parse(raw).through; });
   expect(app.shows("id:menu-unread-count")).toBe(false);
+});
+
+test("switching to a channel with as many rows reads its newest message, not the last view's rows", async () => {
+  // The list reports viewable rows by index; a channel with the same rows as the one before reports nothing new.
+  const room = (slug: string, name: string, at: string) => ({ slug, name, goal: name, status: "active", created: ts(-900), last_activity: at, stale: false, count: 1, refs: [], items: [] });
+  const a = { id: "room-a", ts: ts(40), from: "agent", kind: "notice", text: "Room A update", channel: "room-a" };
+  const b = { id: "room-b", ts: ts(50), from: "agent", kind: "notice", text: "Room B update", channel: "room-b" };
+  const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "macos", network: {
+    ...hub([], [a, b]),
+    [`GET ${URL}/api/channels`]: { body: { channels: [room("room-a", "Room A", a.ts), room("room-b", "Room B", b.ts)] } },
+    [`GET ${URL}/api/channels/feed?*`]: (r: { url: string }) => ({ body: { events: r.url.includes("room-a") ? [a] : [b] } }),
+  } });
+  const readIds = () => { const raw = app.storage()[`hub.read:${URL}`]; return raw ? (JSON.parse(raw).ids as string[]) : []; };
+  await app.waitFor("id:side-channel-unread-room-a");
+  await app.waitFor("id:side-channel-unread-room-b");
+  await app.press("id:side-channel-room-a");
+  await app.waitFor("text:Room A update");
+  await app.waitUntil(() => readIds().includes("room-a"), { timeout: 10000 });
+  await app.press("id:side-channel-room-b");
+  await app.waitFor("text:Room B update");
+  await app.waitUntil(() => readIds().includes("room-b"), { timeout: 10000 });
+  await app.waitUntil(() => !app.shows("id:side-channel-unread-room-b"));
+  expect(app.shows("id:unread-dot-room-b")).toBe(false);
 });
 
 describe("folding page heads", () => {

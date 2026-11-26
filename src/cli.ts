@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 // hub — CLI + daemon for the agent fleet.
+import { usageHeartbeat } from "./telemetry";
 import { guestCmd } from "./guest";
 import { $ } from "bun";
 import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
@@ -32,22 +33,45 @@ import { isWrite, runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
 import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, retireUnrunnableCopy, retireUnrunnableProposed, routineParkedOnDecision, routineQueued, routinesAwaitingApproval, supersedeProposed } from "./autonomy";
-import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, knownHostCaps, runningRev, setApprovalGate, setIdTag } from "./core";
+import { CODE, L, isEnglish, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, knownHostCaps, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, networkBlocked, pendingLoginIds, pickAccount, reportFailure, reportNetworkBlock, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
 import { shellBash } from "./shell";
+import { strayWorkspaces, taskWorkspace, workspaceRoot } from "./workspaces";
+import { gradeMeta, parseGrades } from "../app/grading";
+import { measuredGrade, runReviews } from "./review-grade";
 
 // ------------------------------------------------------------------ routines (scheduled task generators)
 const STATE = P("logs", "routine-state.json");
 
-/** every: "15m" | "hourly" | "daily HH:MM" | "weekdays HH:MM" | "weekly MON HH:MM" */
+/** Interval schedules in minutes: "15m", "2h", "1d", "hourly"; undefined for clock schedules. */
+function intervalMinutes(every: string): number | undefined {
+  const s = every.trim();
+  if (s === "hourly") return 60;
+  const m = s.match(/^(\d+)(m|h|d)$/);
+  return m ? parseInt(m[1]) * { m: 1, h: 60, d: 1440 }[m[2] as "m" | "h" | "d"] : undefined;
+}
+
+/** True when `due` understands the schedule. An unknown one (say "1hr") is never due, so the routine would stop
+ *  silently; the scheduler reports it instead. "1h" and "1d" were set from settings on 2026-11-10 and were read
+ *  as clock times, which stopped issue-triage, triage-inbound and focus-check for over two weeks. */
+export function validEvery(every: string | undefined): boolean {
+  if (!every) return false;
+  if (intervalMinutes(every) !== undefined) return true;
+  const parts = every.trim().split(/\s+/);
+  const clock = /^([01]?\d|2[0-3]):[0-5]\d$/.test(parts.at(-1)!);
+  if (parts.length === 2) return clock && (parts[0] === "daily" || parts[0] === "weekdays");
+  if (parts.length === 3) return clock && parts[0] === "weekly" && /^(SUN|MON|TUE|WED|THU|FRI|SAT)/i.test(parts[1]);
+  return false;
+}
+
+/** every: "15m" | "2h" | "1d" | "hourly" | "daily HH:MM" | "weekdays HH:MM" | "weekly MON HH:MM" */
 export function due(every: string, last: string | undefined, t = new Date()): boolean {
   const parts = every.trim().split(/\s+/);
   const lastT = last ? new Date(last) : null;
-  if (parts[0] === "hourly" || /^\d+m$/.test(parts[0])) {
-    const mins = parts[0] === "hourly" ? 60 : parseInt(parts[0]);
-    return !lastT || +t - +lastT >= mins * 60_000;
-  }
+  const mins = intervalMinutes(every);
+  if (mins !== undefined) return !lastT || +t - +lastT >= mins * 60_000;
+  if (!validEvery(every)) return false;
   const [h, m] = parts.at(-1)!.split(":").map(Number);
   // Most recent slot at or before t, stepping back over days the schedule excludes.
   // A machine asleep at 19:00 used to skip that day's routine entirely: `target` was
@@ -94,6 +118,15 @@ function runRoutines(cfg: Cfg, host: string, primary: boolean) {
     if (r.enabled === false) continue;
     const owner = r.scheduler ?? (r.kind === "learn" ? "each" : "primary"); // which host generates the task
     if (owner === "primary" ? !primary : owner !== "each" && owner !== host) continue;
+    if (!validEvery(r.every)) { // never due; say so once per bad value instead of staying silent
+      const key = `${r.name}#invalid`;
+      if (state[key] !== r.every) {
+        state[key] = r.every;
+        journal(host, `⚠️ routine \`${r.name}\` has an unknown schedule "${r.every}" and will not run; use 15m, 2h, 1d, hourly, daily HH:MM, weekdays HH:MM or weekly MON HH:MM`);
+      }
+      continue;
+    }
+    delete state[`${r.name}#invalid`];
     if (!due(r.every, state[r.name])) continue;
     if (r.kind === "learn") { // local session history → digest → task pinned to this host
       state[r.name] = new Date().toISOString();
@@ -189,6 +222,9 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   let acct: NonNullable<typeof first> = first;
   const promptBody = meta.requeue_note ? `${body}\n\n> ${meta.requeue_note}\n` : body;
   let cli = acct.cli, out = "", res!: ReturnType<typeof parseResult>;
+  // a repo task works in its own worktree under ~/.noop/work, never in the owner's checkout
+  const cwd = await taskWorkspace(meta, cfg, P(), (line) => journal(host, `⚠️ ${meta.id} ${line}`));
+  const promptMeta = { ...meta, workspace: cwd };
   for (let hop = 0; ; hop++) { // quota / login trouble: switch account or CLI on this host instead of waiting it out
     cli = acct.cli;
     const model = cfg.clis?.[cli]?.model ?? (cli === "claude" ? "claude-opus-5-5" : "default");
@@ -207,7 +243,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     const workCfg = limits.checkpointMinutes
       ? { ...cfg, clis: { ...cfg.clis, timeout_minutes: limits.workMinutes } }
       : cfg;
-    out = await runAgent(cli, buildPrompt(meta, promptBody, cfg, b.note, limits), meta.repo || P(), workCfg, log, !!meta.gate_override,
+    out = await runAgent(cli, buildPrompt(promptMeta, promptBody, cfg, b.note, limits), cwd, workCfg, log, !!meta.gate_override,
       { ...b.env, ...accountEnv(acct) });
     if (cancelled.has(meta.id)) { cancelled.delete(meta.id); return; } // the owner cancelled it while it ran
     if (out.includes(RUN_LIMIT)) {
@@ -240,8 +276,8 @@ async function processTask(path: string, cfg: Cfg, host: string) {
           checkpointAt: limits.hardAt,
           hardAt: limits.hardAt,
         };
-        const checkpointOut = await runAgent(cli, buildPrompt(meta, checkpointBody, checkpointCfg, b.note, checkpointLimits),
-          meta.repo || P(), checkpointCfg, checkpointLog, !!meta.gate_override, { ...b.env, ...accountEnv(acct) });
+        const checkpointOut = await runAgent(cli, buildPrompt(promptMeta, checkpointBody, checkpointCfg, b.note, checkpointLimits),
+          cwd, checkpointCfg, checkpointLog, !!meta.gate_override, { ...b.env, ...accountEnv(acct) });
         if (cancelled.has(meta.id)) { cancelled.delete(meta.id); return; }
         const checkpoint = parseResult(checkpointOut);
         if (checkpoint.status !== "failed" && (checkpoint.status !== "waiting" || checkpoint.wait_check)) {
@@ -294,6 +330,10 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     });
     return;
   }
+  // the agent's self-grade of this run, its size measured from the PRs / MRs it names (outside the lock: one read per PR)
+  const reviews = runReviews(res.prs, `${res.summary}\n${res.waiting_on ?? ""}`);
+  const selfGrade = parseGrades(res.grades);
+  const grade = selfGrade && reviews.length && res.status !== "failed" ? await measuredGrade(selfGrade, reviews, !isEnglish()).catch(() => selfGrade) : selfGrade;
   await locked(async () => {
   await _pull();
 
@@ -310,7 +350,8 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     children.push(id);
     journal(host, `  ↳ ${id} → ${f.agent ?? agent}: ${f.title}`);
   }
-  const done = { ...meta, channels: chans, cli_used: cli, finished: now(), status: res.status, gate_override: undefined, requeue_note: undefined, stalls: undefined };
+  // a later run without a grade keeps the earlier one
+  const done = { ...meta, channels: chans, cli_used: cli, finished: now(), status: res.status, gate_override: undefined, requeue_note: undefined, stalls: undefined, ...(grade ? gradeMeta(grade) : {}) };
   const runNote = `\n\n## Run ${now()} · ${host} · ${cli}\n**${res.status}** — ${res.summary}\n`;
   // the owner added to the request while it ran: run again with the additions instead of reporting a stale result
   const latest = existsSync(path) ? readDoc(path).body : body;
@@ -332,8 +373,15 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     const wakes = Number(meta.wakes ?? 0);
     // the owner's approval covers the whole task: a wait for CI before the approved merge must not revoke it
     writeDoc(P("tasks", "waiting", `${meta.id}.md`), { ...done, gate_override: meta.gate_override, waiting_since: meta.waiting_since || now(), parked_at: now(), wake_at: w.wake_at, wait_kind: w.kind, wakes: wakes ? String(wakes) : undefined,
-      waiting_on: res.waiting_on ?? "", wait_check: res.wait_check || undefined, wait_check_base: undefined },
+      waiting_on: res.waiting_on ?? "", wait_check: res.wait_check || undefined, wait_check_base: undefined, wait_note: res.summary?.trim() || meta.wait_note },
       body + runNote + `\n**Waiting on:** ${res.waiting_on ?? "?"} (${w.kind === "human" ? "wakes on the owner's answer or an event" : `check again ${w.wake_at}`})\n`);
+    // a stage finished before the wait: bring it to the main chat like a result, once per new summary (a recheck with nothing new stays quiet)
+    if (waitProgressIsNew(meta, res)) {
+      const text = `${res.summary!.trim()}\n${L("Waiting on", "等待")}: ${res.waiting_on ?? "?"}`;
+      void notify(ownerWork && !meta.parent && meta.source === "owner@chat" ? text : `${meta.title}\n${text}`, cfg,
+        ownerWork && !meta.parent ? { kind: "notice", ref: meta.id, attachments: res.attachments, from: `${agentName(agent)}@${host}` }
+          : { kind: "system", ref: meta.id, attachments: res.attachments, from: `${agentName(agent)}@${host}`, quiet: true });
+    }
     if (!sameWaitAgain(meta, res.waiting_on)) journal(host, w.kind === "human" ? L(`⏳ ${meta.id} waiting on you: ${res.waiting_on ?? ""} (no timer, continues on the event)`, `⏳ ${meta.id} 等你处理：${res.waiting_on ?? ""}（不定时唤醒，事件到达再继续）`) : w.kind === "event" ? L(`⏳ ${meta.id} waiting on ${res.waiting_on ?? ""} (wakes when its check changes, at the latest ${w.wake_at})`, `⏳ ${meta.id} 等待 ${res.waiting_on ?? ""}（检查命令变化即唤醒，最迟 ${w.wake_at}）`) : L(`⏳ ${meta.id} waiting on ${res.waiting_on ?? ""}, checking again in ${w.minutes} minutes`, `⏳ ${meta.id} 等待 ${res.waiting_on ?? ""}，${w.minutes} 分钟后再看`));
   } else if (res.status === "needs_decision") {
     const did = openDecision(meta, res, host);
@@ -355,6 +403,13 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   }
   await _commitPush(`[${host}] ${res.status} ${meta.id}: ${meta.title}`);
   });
+}
+
+/** A parked run reports progress only when it says something new; the checkpoint fallback has nothing to report. */
+export function waitProgressIsNew(meta: Record<string, string | undefined>, res: Pick<Result, "summary" | "waiting_on">): boolean {
+  const s = res.summary?.trim();
+  if (!s || /^checkpoint saved/.test(res.waiting_on ?? "")) return false;
+  return s !== (meta.wait_note ?? "").trim();
 }
 
 export function checkpointFallback(id: string, log: string, resumeAt = Date.now() + 5 * 60_000): Result {
@@ -441,18 +496,29 @@ async function answerReplies(cfg: Cfg, host: string, queued: ReturnType<typeof p
 }
 
 /** Requeue tasks whose claiming host went silent (crash, sleep, network loss). */
-function reapStale(cfg: Cfg, host: string, ownOnly = false) {
+export function reapStale(cfg: Cfg, host: string, ownOnly = false) {
   const alive = new Set(onlineHosts(cfg).map((h) => h.host));
   const graceMs = (cfg.fleet?.reap_after_minutes ?? 20) * 60_000;
   for (const p of list(P("tasks", "active"), /^T-.*\.md$/)) {
     const { meta, body } = readDoc(p);
+    const own = meta.claimed_by === host;
     // own tasks not run by this process were orphaned by a crash/restart (we're alive, so no one else reaps them)
-    if (meta.claimed_by === host ? runningIds.has(meta.id) : ownOnly || alive.has(meta.claimed_by)) continue;
+    if (own ? runningIds.has(meta.id) : ownOnly || alive.has(meta.claimed_by)) continue;
     if (Date.now() - Date.parse(meta.started) < graceMs) continue;
+    // The task is queued again already (a failed claim or a stalled run put it back): this active copy is a stale
+    // claim restored from the sync base. Drop it — requeueing would overwrite the queued copy's attempt and stall
+    // counters, so the task could reset its retry budget forever (2026-11-25: 69 such lines in one day).
+    if (own && existsSync(P("tasks", "inbox", `${meta.id}.md`))) {
+      require("node:fs").unlinkSync(p);
+      journal(host, `♻️ dropped the stale claim of ${meta.id} on ${host} (it is already queued again)`);
+      continue;
+    }
     writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, claimed_by: undefined, requeued: now(),
-      requeue_note: `Requeued: host ${meta.claimed_by} went offline mid-task. Check for partial work (branch agent/${meta.id}-*).` }, body);
+      requeue_note: own
+        ? `Requeued: no run of this task is alive on ${host} (crashed or restarted). Check for partial work (branch agent/${meta.id}-*).`
+        : `Requeued: host ${meta.claimed_by} went offline mid-task. Check for partial work (branch agent/${meta.id}-*).` }, body);
     require("node:fs").unlinkSync(p);
-    journal(host, `♻️ requeued ${meta.id} (host ${meta.claimed_by} offline)`);
+    journal(host, own ? `♻️ requeued ${meta.id} (claimed by ${host}, but its run is gone)` : `♻️ requeued ${meta.id} (host ${meta.claimed_by} offline)`);
   }
 }
 
@@ -930,7 +996,9 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
 async function foreground(cfg: Cfg) {
   if (process.stdin.isTTY) {
     const svc = await serviceState();
-    if (svc.running && svc.pid !== process.pid && svc.pid !== process.ppid) {
+    // Only a known pid tells another copy apart from this one: a Windows Scheduled Task has a console (so a TTY) and
+    // schtasks reports no pid, so the task would otherwise see itself as "already running" and exit 1 at every start.
+    if (svc.running && svc.pid && svc.pid !== process.pid && svc.pid !== process.ppid) {
       process.exitCode = 1;
       return void console.log(`✗ noop is already running as a service${svc.pid ? ` (pid ${svc.pid})` : ""}. Stop it first (noop stop), or watch it with noop status.`);
     }
@@ -1130,6 +1198,7 @@ async function daemon(cfg: Cfg) {
     }
     if (!draining) await ownerUpdate(c, host);
     await locked(() => guardMemory(host)); // damage sync reported since the last tick; the daily memory snapshot
+    if (!draining) void usageHeartbeat(c).catch(() => null);
     try { await tick(c, true); failures = 0; } catch (e) {
       console.error("tick failed", e);
       if (++failures >= 3) void medic(`noop daemon: ${failures} consecutive tick failures on ${host}.\n${(e as Error)?.stack ?? e}`, c, { auto: true, kind: "daemon" });
@@ -1287,6 +1356,7 @@ const HELP = `Noop — your own AI team
   noop metrics [days]         per-agent success, judge vs owner decisions (feeds self-evolution)
   noop usage                  weekly usage report (also posted every Monday by the built-in routine)
   noop agents                 list fleet members
+  noop workspaces             where task worktrees live (~/.noop/work) and any left outside it, e.g. next to your repos (lists only)
   noop notify "text"          test Slack/Discord
   noop security [--json]      check this Noop deployment (2FA, sessions, OAuth clients, allow-lists) and this machine's Noop setup
   noop 2fa setup              bind (or re-bind) the authenticator app every sign-in requires; noop 2fa confirm <code> · noop 2fa status
@@ -1444,6 +1514,14 @@ async function main() {
       return void (await cloudDeploy(cfg));
     }
     case "notify": return void console.log(await notify(rest.join(" "), cfg));
+    case "workspaces": {
+      const stray = await strayWorkspaces(cfg);
+      console.log(`Noop workspaces: ${workspaceRoot(cfg)}`);
+      if (!stray.length) return void console.log("Nothing left outside it.");
+      console.log(`Left outside it (${stray.length}; nothing was removed):`);
+      for (const s of stray) console.log(`  ${s.kind.padEnd(15)} ${s.path}${s.repo ? `  (of ${s.repo})` : ""}`);
+      return;
+    }
     default: console.log(HELP);
   }
 }

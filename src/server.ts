@@ -12,6 +12,7 @@
 //   GET  /media/<file>                    → attachment
 //   GET  /api/files/list?prefix=  · GET /api/files/read?path=   → read-only rules & memory (same shape as the Worker)
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { gradeOf } from "../app/grading";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { ServerWebSocket } from "bun";
@@ -22,7 +23,7 @@ import { mediaResponse, ownerAttachments, sniffImage, uploadId, uploadProblem } 
 import { timingSafeEqual } from "node:crypto";
 import { readable, validPath } from "../cloud/src/files";
 import { channelDigest, channelsView, parseTaskBody, taskHistory, taskInfo } from "../cloud/src/tools";
-import { channels, originChannel, updateChannel } from "./channels";
+import { channels, updateChannel } from "./channels";
 import { localStore } from "./brain";
 import { ensureWebClient } from "./webclient";
 import { localSecretList, localSecretPut } from "./secrets";
@@ -83,8 +84,8 @@ export const setMirror = (fn: (e: Event) => void) => { mirror = fn; };
 export function appendEvent(e: Omit<Event, "id" | "ts"> & Partial<Pick<Event, "id" | "ts">>, opts: { mirror?: boolean } = {}): Event {
   mkdirSync(FEED_DIR, { recursive: true });
   const ev: Event = { id: crypto.randomUUID(), ts: new Date().toISOString(), ...e };
-  // results and cards of work started in a channel stay in that channel
-  if (!ev.channel && ev.ref) { const c = originChannel(ev.ref); if (c) ev.channel = c; }
+  // results and cards of work started in a channel are not tagged with it: they show in the main chat, and the
+  // channel's digest picks them up through its task refs (the owner reads conclusions in the main chat, 2026-11-26)
   if (opts.mirror !== false) mirror?.(ev);
   appendFileSync(join(FEED_DIR, `${today()}.jsonl`), JSON.stringify(ev) + "\n");
   for (const ws of sockets) ws.send(JSON.stringify(ev));
@@ -186,7 +187,7 @@ export function taskView(path: string, state: string, log: string[]) {
   const needs = state === "inbox" && m.parked && m.requires ? String(m.requires) : undefined;
   if (needs) state = "nohost";
   return { id: m.id, title: m.title, agent: m.agent, host: m.claimed_by, state, needs, waiting_on: m.waiting_on, wake_at: m.wake_at, started: m.started, created: m.created, cli: m.cli_used, model: m.model,
-    finished: m.finished, updated: m.finished ?? m.started ?? m.created, attempt: m.attempt, decision: m.decision, request, runs, steps };
+    finished: m.finished, updated: m.finished ?? m.started ?? m.created, attempt: m.attempt, decision: m.decision, grade: gradeOf(m, false), request, runs, steps };
 }
 
 type TaskView = ReturnType<typeof taskView>;
@@ -194,13 +195,18 @@ type TaskView = ReturnType<typeof taskView>;
 const taskStore = () => localStore({ acts: {}, status: () => ({}), feed: () => [] });
 
 /** Per host: what it runs now, what it finished lately, and (for this machine) its AI accounts. */
+/** The fleet's primary: the one [fleet] primary names, else this machine (only the primary serves the API). */
+const primaryHost = (cfg: Cfg | null) => String(cfg?.fleet?.primary ?? "") || (cfg ? hostName(cfg) : "");
+
 function hostViews(active: TaskView[], finished: TaskView[]) {
   let cfg: Cfg | null = null;
   try { cfg = loadConfig(); } catch {}
   const me = cfg ? hostName(cfg) : "";
+  const primary = primaryHost(cfg);
   const ran = (t: TaskView, h: string) => t.host === h || t.runs.some((r) => r.host === h);
   return onlineHosts(cfg ?? {}).map((h) => ({
     ...h,
+    primary: h.host === primary,
     os: h.caps.find((c) => c.startsWith("os:"))?.slice(3),
     arch: h.caps.find((c) => c.startsWith("arch:"))?.slice(5),
     clis: h.caps.filter((c) => c.startsWith("cli:")).map((c) => c.slice(4)),
@@ -302,7 +308,7 @@ export function settingsView() {
       routines: (cfg.routine ?? []).map((r: any) => ({ name: r.name, desc: routineDesc(r), every: r.every, agent: r.agent, enabled: r.enabled !== false })),
       max_parallel: cfg.host?.max_parallel ?? null,
       media_days: mediaDays(cfg),
-      hosts: knownHosts().map((host) => ({ host, priority: hostPriority(cfg, host) })),
+      hosts: knownHosts().map((host) => ({ host, priority: hostPriority(cfg, host), primary: host === primaryHost(cfg) })),
     },
     options: { clis: [["claude"], ["codex", "claude"], ["claude", "codex"], ["codex"]], autonomy: ["onboarding", "assisted", "autonomous"] },
   };

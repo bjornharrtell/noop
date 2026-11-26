@@ -1,6 +1,7 @@
 // noop: the server's shapes and the pure logic of the timeline (no UI, no I/O), shared by App.tsx and the tests.
 import { L } from "./i18n";
 import { isWaiting } from "./badge";
+import type { Grade } from "./grading";
 
 export type Kind = "notice" | "decision" | "menu" | "proposals" | "login" | "owner" | "system";
 
@@ -24,6 +25,8 @@ export type HubEvent = {
 export type HostInfo = {
   host: string;
   caps: string[];
+  /** The fleet's primary: it runs the server, routines and the judge. */
+  primary?: boolean;
   seen?: string;
   busy?: number;
   stats?: { loadRatio?: number; load1?: number; cores?: number; memFreePct?: number; diskFreeGB?: number; diskFreePct?: number; [k: string]: unknown };
@@ -63,6 +66,8 @@ export type TaskInfo = {
   /** state "active": its agent's latest sign of life. */
   activity?: Activity;
   runs?: { ts: string; host: string; cli: string; status: string; summary: string }[];
+  /** The agent's self-grade of its work (notes only on the task's own page, not in the status). */
+  grade?: Grade;
   steps?: { day?: string; time?: string; host?: string; kind?: string; text: string }[];
 };
 
@@ -318,7 +323,7 @@ export type SettingsView = {
     max_parallel: number | null;
     media_days?: number;
     /** Machines and their task priority (higher takes tasks first; 0 by default). */
-    hosts?: { host: string; priority: number }[];
+    hosts?: { host: string; priority: number; primary?: boolean }[];
   };
   options: { clis: string[][]; autonomy: string[] };
 };

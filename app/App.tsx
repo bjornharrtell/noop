@@ -53,6 +53,8 @@ import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, insta
 // shellInfo through the namespace: runtimes older than it lack the export, and a missing named import would fail to link
 import * as nshUpdater from "nsh/updater";
 import { CLIENT_VERSION } from "./version";
+import { chatScreen, nsmetry } from "./analytics";
+import { useNsMetry, useScreenTracking } from "nsmetry";
 
 /** One row of the system menu `MenuButton` shows: an action, a submenu (`items`) or an inline group (`inline`). */
 type MenuButtonItem = { id: string; label: string; icon?: string; disabled?: boolean; checked?: boolean; inline?: boolean; items?: MenuButtonItem[] };
@@ -200,6 +202,7 @@ import {
   type TaskInfo,
 } from "./hub";
 import { notificationFor, type NotifyRules } from "./notify";
+import { GradeCard, GradeChip, GradeLine } from "./grade-view";
 import { type McpServer, mcpServers, mcpProblem, mcpVars, formatPairs, parsePairs, splitCommand, joinCommand } from "./mcp-servers";
 import { DEMO_CODE, DEMO_EMAIL, DEMO_TOKEN, DEMO_TOTP, DEMO_URL, hubFetch, isDemo, openSocket, type Socket } from "./demo";
 // Email sign-in code length (cloud/src/index.ts CODE_LEN): letters and digits, case-insensitive.
@@ -1418,9 +1421,16 @@ function Message(props: {
     const task = [...(s?.active ?? []), ...(s?.recent ?? [])].find((t) => t.id === e.ref);
     return [...(e.options ?? []), task?.title ?? "", ...props.hub.events().filter((x) => x.ref === e.ref && x.id !== e.id).map((x) => x.text)].join("\n");
   };
+  // an agent's result about a task it graded: the grade at a glance, under the words
+  const graded = () => {
+    if (ask || e.kind !== "notice" || !e.ref || isHub(e.from)) return undefined;
+    const s = props.hub.status();
+    return [...(s?.active ?? []), ...(s?.recent ?? [])].find((t) => t.id === e.ref)?.grade;
+  };
   const body = (
     <View style={{ gap: 10 }}>
       <Rich text={ask ? e.text.replace(/\n*^(?:建议：|Recommended: ).*$/m, "").trimEnd() : e.text} muted={e.kind === "system" && isHub(e.from)} context={about()} />
+      <If when={graded()}>{(g) => <GradeLine testID={`msg-grade-${e.id}`} grade={g()} />}</If>
       <If when={e.attachments?.length}>
         <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start", gap: 10 }}>
           <Each of={e.attachments ?? []}>{(a) => <Media hub={props.hub} path={a()} siblings={e.attachments} />}</Each>
@@ -1772,6 +1782,7 @@ function TaskHistory(props: { hub: Hub; wide: boolean; onTask: (id: string) => v
                 <Indicator status={TONE[t().state ?? ""] ?? "idle"} />
                 <Text style={{ fontFamily: MONO, fontSize: 12.5, color: colors.faint }}>{t().id}</Text>
                 <Text style={{ flex: 1, fontSize: 14.5, color: colors.text, numberOfLines: 1 }}>{t().title}</Text>
+                <If when={t().grade}>{(g) => <GradeChip testID={`task-grade-${t().id}`} grade={g()} />}</If>
                 <Text style={{ fontSize: 12.5, color: colors.faint, fontVariant: ["tabular-nums"] }}>{`${STATE_OF()[t().state ?? ""]?.[0] ?? ""} · ${clock(t().updated ?? "")}`}</Text>
               </View>
             )}
@@ -1975,6 +1986,10 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
               <Text testID="task-activity" style={{ marginTop: 10, fontSize: 13.5, lineHeight: 19, color: a().quiet ? colors.warn : colors.muted }}>{a().text}</Text>
             )}
           </If>
+          {/* the agent's self-grade: how hard to look at this before trusting it (notes come with the task's own read) */}
+          <If when={older()?.grade ?? t()!.grade}>
+            {(g) => <View style={{ marginTop: 16 }}><GradeCard grade={g()} wide={props.wide} /></View>}
+          </If>
           <If when={t()!.state === "nohost"}>
             <View testID="task-nohost" style={{ marginTop: 16, paddingHorizontal: 14, paddingVertical: 11, borderRadius: radius.inset, backgroundColor: tints.warn }}>
               <Text style={{ fontSize: 14, lineHeight: 21, color: colors.text }}>
@@ -2121,6 +2136,7 @@ function MachineDetail(props: { hub: Hub; host: string; wide: boolean; onTask: (
             <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
               <Indicator status="online" />
               <Text style={{ userSelect: "text", fontSize: 20, fontWeight: "600", color: colors.text }}>{h()!.host}</Text>
+              <If when={h()!.primary}><PrimaryBadge host={h()!.host} /></If>
             </View>
             <Text style={{ fontSize: 14, color: colors.muted }}>
               {[L("Online", "在线"), [h()!.os ?? osOf(h()!), h()!.arch].filter(Boolean).join(" "), h()!.seen ? L(`Seen ${ago(h()!.seen)}`, `心跳 ${ago(h()!.seen)}`) : "", L(`${h()!.busy ?? 0} running`, `${h()!.busy ?? 0} 个运行中`)].filter(Boolean).join(" · ")}
@@ -2797,7 +2813,16 @@ function PriorityInput(props: { host: string; value: number; onChange: (value: n
   );
 }
 /** Machine priority rows: changes stay a local draft until Save sends them in one write (clicks never write). */
-function HostPriorityRows(props: { hosts: { host: string; priority: number }[]; save: (patch: Record<string, unknown>) => Promise<void>; row: (host: string, index: number, input: JSX.Element) => JSX.Element }) {
+/** Marks the fleet's primary wherever machines are listed. */
+function PrimaryBadge(props: { host: string }) {
+  return (
+    <View testID={`primary-${props.host}`} accessibilityLabel={L(`${props.host} is the primary`, `${props.host} 是主控机`)}>
+      <Badge label={L("Primary", "主控机")} variant="info" size="sm" />
+    </View>
+  );
+}
+
+function HostPriorityRows(props: { hosts: { host: string; priority: number; primary?: boolean }[]; save: (patch: Record<string, unknown>) => Promise<void>; row: (host: string, index: number, input: JSX.Element, primary: boolean) => JSX.Element }) {
   const draft = signal<Record<string, number>>({});
   const busy = signal(false);
   const value = (h: { host: string; priority: number }) => draft()[h.host] ?? h.priority;
@@ -2813,7 +2838,7 @@ function HostPriorityRows(props: { hosts: { host: string; priority: number }[]; 
       <Each of={props.hosts}>
         {(h, i) => props.row(h().host, i(), (
           <PriorityInput host={h().host} value={value(h())} onChange={(v) => draft.update((d) => ({ ...d, [h().host]: v }))} />
-        ))}
+        ), !!h().primary)}
       </Each>
       <If when={changed().length > 0}>
         <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8, paddingHorizontal: 16, paddingVertical: 12 }}>
@@ -3366,9 +3391,12 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
               </Group>
               <If when={(e().hosts ?? []).length > 0}>
               <Group title={L("Machine priority", "机器优先级")} hint={PRIORITY_HINT()}>
-                <HostPriorityRows hosts={e().hosts ?? []} save={save} row={(host, _i, input) => (
+                <HostPriorityRows hosts={e().hosts ?? []} save={save} row={(host, _i, input, primary) => (
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 16, paddingVertical: 14 }}>
-                    <Text style={{ flex: 1, fontSize: 15.5, color: colors.text }}>{host}</Text>
+                    <View style={{ flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <Text style={{ flexShrink: 1, fontSize: 15.5, color: colors.text, numberOfLines: 1 }}>{host}</Text>
+                      <If when={primary}><PrimaryBadge host={host} /></If>
+                    </View>
                     {input}
                   </View>
                 )} />
@@ -3429,6 +3457,9 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
               <Button label={L("Sign out", "退出登录")} variant="danger" onPress={props.onDisconnect} testID="logout" />
             </View>
           </View>
+        </Group>
+        <Group title={L("IP allow-list", "IP 白名单")} hint={ALLOW_HINT()}>
+          <AllowIpRows hub={props.hub} />
         </Group>
         </If>
       </View>
@@ -3687,6 +3718,140 @@ const SECRETS_HINT = () => L(
   "Entered once here, used by every machine. Stored encrypted in your own cloud, never in the team's data; this app can replace or delete a key but never show it again. A machine's own environment variable is used when no key here has that name.",
   "在这里填一次，所有机器都能用。加密保存在你自己的云端，不进团队数据；客户端只能替换或删除，无法再查看。这里没有的名字，才使用机器自己的同名环境变量。",
 );
+
+const ALLOW_HINT = () => L(
+  "Only these networks can open Noop (the app, the web page and the machines). Edit, then Save: the primary updates the server within a minute. A range such as 1.2.3.0/24 covers a whole network; phones on mobile data often change IPv6 addresses, so add their /64.",
+  "只有这些网络能打开 Noop（客户端、网页和各台机器）。编辑后点保存，主控机会在一分钟内更新线上。可以写网段，如 1.2.3.0/24；手机流量的 IPv6 地址常变，写它的 /64 网段。",
+);
+
+type AllowView = { entries: { value: string; mine: boolean }[]; on: boolean; ip: string; machines: string[]; pending: { value: string; at: number; error?: string } | null };
+/** Loose shape check before an entry goes into the draft; the Worker parses it for real on Save. */
+const ALLOW_ENTRY = /^(\d{1,3}(\.\d{1,3}){3}|[0-9a-f:]*:[0-9a-f:.]*)(\/\d{1,3})?$/i;
+
+/** The Worker's IP allow-list (HUB_ALLOW_IPS): edit the rows, then Save once. */
+function AllowIpRows(props: { hub: Hub }) {
+  const view = signal<AllowView | null>(null);
+  const draft = signal<string[] | null>(null); // null: no edits
+  const busy = signal(false), note = signal("");
+  const adding = signal(false), entry = signal(""), entryNote = signal("");
+  let alive = true, polling = false;
+  cleanup(() => { alive = false; });
+  const load = async () => {
+    const r = await props.hub.api("GET", "/api/allow-ips").catch(() => null);
+    if (r?.ok && Array.isArray(r.data.entries)) view.set(r.data as unknown as AllowView);
+  };
+  // after a save, look until the primary has set the secret (the Worker then reports the new list) or reports an error
+  const watch = async () => {
+    if (polling) return;
+    polling = true;
+    for (let i = 0; alive && i < 45 && view()?.pending && !view()!.pending!.error; i++) {
+      await new Promise((ok) => setTimeout(ok, 4000));
+      await load();
+    }
+    polling = false;
+  };
+  void load().then(() => { if (view()?.pending) void watch(); });
+  const live = () => (view()?.entries ?? []).map((e) => e.value);
+  const list = () => draft() ?? live();
+  const mine = (v: string) => (view()?.entries ?? []).some((e) => e.value === v && e.mine);
+  const dirty = () => draft() !== null && draft()!.join(",") !== live().join(",");
+  const remove = (v: string) => { draft.set(list().filter((x) => x !== v)); note.set(""); };
+  const openAdd = () => { entry.set(view()?.ip && !list().length ? view()!.ip : ""); entryNote.set(""); adding.set(true); };
+  const add = () => {
+    const v = entry().trim().toLowerCase();
+    if (!ALLOW_ENTRY.test(v)) return entryNote.set(L("Enter an IPv4 or IPv6 address, optionally with /prefix", "请输入 IPv4 或 IPv6 地址，可带 /网段长度"));
+    if (list().includes(v)) return entryNote.set(L(`${v} is already on the list`, `${v} 已经在名单里`));
+    draft.set([...list(), v]); note.set(""); adding.set(false);
+  };
+  const save = async (force = false): Promise<void> => {
+    busy.set(true); note.set("");
+    const r = await props.hub.api("PUT", "/api/allow-ips", { entries: list(), force }).catch(() => null);
+    busy.set(false);
+    if (r?.ok) { view.set(r.data as unknown as AllowView); draft.set(null); void watch(); return; }
+    const msg = String(r?.data.error ?? L(`Couldn’t save (${r?.status ?? "offline"})`, `保存失败（${r?.status ?? "离线"}）`));
+    if (r?.data.code === "machines") {
+      const a = await AlertDialog.show({
+        title: L("Shut out a machine?", "要挡住机器吗？"), description: msg,
+        actions: [{ id: "cancel", label: L("Cancel", "取消"), role: "cancel" }, { id: "save", label: L("Save anyway", "仍然保存"), role: "destructive" }],
+      });
+      if (a.action === "save") return save(true);
+      return;
+    }
+    note.set(msg);
+  };
+  const pending = () => view()?.pending;
+  return (
+    <>
+      <If when={view() && !list().length}>
+        <SetRow first label={L("Off", "未开启")} detail={L("Any network can open the login page. Add an entry to turn it on.", "任何网络都能打开登录页。添加一项即开启。")} testID="allow-off" />
+      </If>
+      <Each of={list()} key={(v) => v}>
+        {(v, i) => (
+          <SettingsItem first={i() === 0} testID={`allow-row-${v()}`} style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+            <Text style={{ flex: 1, minWidth: 0, fontFamily: MONO, fontSize: 14.5, color: colors.text, numberOfLines: 1 }}>{v()}</Text>
+            <If when={mine(v())}>
+              <Badge label={L("This device", "本设备")} variant="info" />
+            </If>
+            <IconButton testID={`allow-remove-${v()}`} icon="close" label={L(`Remove ${v()}`, `移除 ${v()}`)} size="sm" disabled={busy()} onPress={() => remove(v())} />
+          </SettingsItem>
+        )}
+      </Each>
+      <SetRow first={!view()} label={L("Add IP or range", "添加 IP 或网段")} tone="accent" leading={<Icon name="plus" size={16} tint={colors.info} />} disabled={busy()} onPress={openAdd} testID="allow-add" />
+      <If when={pending()}>
+        <SetRow
+          label={pending()?.error ? L("Not applied", "没有生效") : L("Applying…", "正在生效…")}
+          detail={pending()?.error ?? L("Waiting for the primary to update the server", "等主控机更新线上")}
+          tone={pending()?.error ? "danger" : undefined}
+          leading={pending()?.error ? undefined : <Spinner size={14} tint={colors.muted} />}
+          testID="allow-pending"
+        />
+      </If>
+      <If when={dirty() || note()}>
+        <View style={{ gap: 8, paddingHorizontal: 16, paddingVertical: 12 }}>
+          <Separator top />
+          <If when={note()}>
+            <Text testID="allow-note" style={{ fontSize: 13, color: colors.danger, userSelect: "text" }}>{note()}</Text>
+          </If>
+          <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
+            <Button label={L("Discard", "放弃修改")} variant="ghost" disabled={busy() || !dirty()} onPress={() => { draft.set(null); note.set(""); }} testID="allow-discard" />
+            <Button label={busy() ? L("Saving…", "正在保存…") : L("Save", "保存")} variant="primary" disabled={busy() || !dirty()} onPress={() => void save()} testID="allow-save" />
+          </View>
+        </View>
+      </If>
+      <FormDialog
+        testID="allow-editor"
+        open={adding()}
+        onClose={() => adding.set(false)}
+        title={L("Add IP or range", "添加 IP 或网段")}
+        subtitle={view()?.ip ? L(`This device's IP: ${view()!.ip}`, `这台设备的 IP：${view()!.ip}`) : undefined}
+        footer={
+          <>
+            <If when={view()?.ip && !list().includes(view()!.ip)}>
+              <Button label={L("Use this device's IP", "填入本机 IP")} variant="ghost" onPress={() => { entry.set(view()!.ip); entryNote.set(""); }} testID="allow-use-mine" />
+            </If>
+            <View style={{ flex: 1 }} />
+            <Button label={L("Cancel", "取消")} variant="ghost" onPress={() => adding.set(false)} testID="allow-cancel" />
+            <Button label={L("Add", "添加")} variant="primary" disabled={!entry().trim()} onPress={add} testID="allow-confirm" />
+          </>
+        }
+      >
+        <Field
+          label={L("IP or range", "IP 或网段")}
+          value={entry()}
+          onChange={(v) => { entry.set(v); entryNote.set(""); }}
+          placeholder="203.0.113.7 · 203.0.113.0/24 · 2001:db8::/64"
+          testID="allow-entry"
+          autoFocus
+          hint={L("Added to the list below; nothing changes until you Save.", "加到下方名单里，点保存后才生效。")}
+          onSubmit={add}
+        />
+        <If when={entryNote()}>
+          <Text testID="allow-entry-note" style={{ fontSize: 13, color: colors.danger }}>{entryNote()}</Text>
+        </If>
+      </FormDialog>
+    </>
+  );
+}
 
 /** The shared MCP servers: one row each (its command or address, an on/off switch), then "Add". */
 function McpRows(props: { settings: Settings }) {
@@ -3954,11 +4119,35 @@ function VersionRows(props: { hub: Hub }) {
   // The installed app around that code (on iOS its CFBundleShortVersionString / CFBundleVersion) and its NSH runtime.
   const info = (nshUpdater as { shellInfo?: () => ShellInfo }).shellInfo?.();
   const shell = shellLine(info, platform.os);
+  // Settings' manual check: the same OTA flow as the hourly one, with an answer either way.
+  const checking = signal(false);
+  const checked = signal<"" | "ready" | "shell" | "latest" | "failed">("");
+  const checkNow = async () => {
+    if (checking()) return;
+    checking.set(true);
+    checked.set("");
+    checked.set(await updates.checkNow());
+    checking.set(false);
+  };
+  const phone = platform.os === "ios" || platform.os === "android";
+  const checkedText = () => {
+    const u = appUpdate();
+    const v = u.kind === "none" ? "" : u.version;
+    switch (checked()) {
+      case "ready": return phone ? L(`${v} is downloaded. Reopen Noop to use it.`, `${v} 已下载，重新打开 Noop 即可使用。`) : L(`${v} is downloaded. Restart from the sidebar to use it.`, `${v} 已下载，在侧边栏点重启即可更新。`);
+      case "shell": return L(`The code is up to date. A new app shell ${v} is available below.`, `代码已是最新；有新外壳 ${v}，可在下方更新。`);
+      case "latest": return L("You’re up to date.", "已是最新版本。");
+      case "failed": return L("Couldn’t check for updates. Check your network and try again.", "检查更新失败，请检查网络后重试。");
+      default: return "";
+    }
+  };
   const shellText = shell?.text === "no-packages" ? L(`${info!.version ?? "?"} (${info!.build ?? "?"}) takes no over-the-air updates: install the app again`, `${info!.version ?? "?"}（${info!.build ?? "?"}）收不到自动更新：请重新安装 App`)
     : shell?.text;
   return (
     <>
-      <SetRow first label={L("This app", "本机客户端")} value={client} testID="version-client" />
+      <SetRow first label={L("This app", "本机客户端")} value={client} testID="version-client"
+        trailing={<Button label={checking() ? L("Checking…", "检查中…") : L("Check for updates", "检查更新")} size="sm" variant="secondary" loading={checking()} disabled={checking()} onPress={() => void checkNow()} testID="check-update" />}
+        below={<If when={checked()}><Text testID="check-update-result" style={{ fontSize: 13, lineHeight: 18, color: checked() === "failed" ? colors.danger : colors.muted }}>{checkedText()}</Text></If>} />
       <If when={shell}>
         <SetRow label={L("App shell", "外壳")} value={shell?.tone === "ok" ? shellText : undefined} detail={shell?.tone === "bad" ? shellText : undefined} tone={shell?.tone === "bad" ? "danger" : undefined} testID="version-shell" below={<ShellUpdate state={appUpdate()} onUpdate={() => void updates.installShell()} />} />
       </If>
@@ -3968,6 +4157,7 @@ function VersionRows(props: { hub: Hub }) {
           return (
             <SetRow
               label={h().host}
+              badge={h().primary ? <PrimaryBadge host={h().host} /> : undefined}
               value={h().rev?.slice(0, 7) ?? L("Unknown", "未知")}
               chevron={!!h().rev_url}
               onPress={h().rev_url ? () => void openUrl(h().rev_url!).catch(() => {}) : undefined}
@@ -4001,6 +4191,8 @@ function VersionRows(props: { hub: Hub }) {
 
 function SetRow(props: {
   label: string;
+  /** A tag right after the label (the primary machine). */
+  badge?: JSX.Element;
   detail?: string;
   value?: string;
   first?: boolean;
@@ -4031,8 +4223,11 @@ function SetRow(props: {
       </If>
       {props.leading}
       <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8, minWidth: 0 }}>
         <Text
           style={{
+            flexShrink: 1,
+            flexGrow: props.badge ? 0 : 1,
             fontSize: 16,
             textAlign: props.tone === "danger" && !props.trailing && !props.chevron ? "center" : "left",
             color: props.disabled ? colors.faint : props.tone === "danger" ? colors.danger : props.tone === "accent" ? colors.info : colors.text,
@@ -4041,6 +4236,8 @@ function SetRow(props: {
         >
           {props.label}
         </Text>
+        {props.badge}
+        </View>
         <If when={props.detail}>
           <Text style={{ fontSize: 13, lineHeight: 18, color: colors.muted }}>{props.detail}</Text>
         </If>
@@ -4191,7 +4388,7 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
             </Section>
             <If when={(e().hosts ?? []).length > 0}>
               <Section title={L("Machine priority", "机器优先级")} hint={PRIORITY_HINT()}>
-                <HostPriorityRows hosts={e().hosts ?? []} save={save} row={(host, i, input) => <SetRow first={i === 0} label={host} trailing={input} />} />
+                <HostPriorityRows hosts={e().hosts ?? []} save={save} row={(host, i, input, primary) => <SetRow first={i === 0} label={host} badge={primary ? <PrimaryBadge host={host} /> : undefined} trailing={input} />} />
               </Section>
             </If>
           </View>
@@ -4208,6 +4405,9 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
       </Section>
       <Section title={L("Keys", "密钥")} hint={SECRETS_HINT()}>
         <SecretRows settings={props.settings} />
+      </Section>
+      <Section title={L("IP allow-list", "IP 白名单")} hint={ALLOW_HINT()}>
+        <AllowIpRows hub={props.hub} />
       </Section>
       <Section title={L("Image retention", "图片保留")} hint={MEDIA_HINT()}>
         <MediaDaysChoices settings={props.settings} />
@@ -4616,6 +4816,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   const scope = signal<string | null>(null);
   effect(() => { const r = top(); readerAt.set(r.name === "task" ? `task:${r.id}` : r.name === "channel" ? `channel:${scope() ?? ""}` : r.name); });
   const scoped = () => { const slug = scope(); return slug ? channels.list().find((c) => c.slug === slug) : undefined; };
+  // Analytics: the page's kind only; a channel's slug, a task id or a doc path never leaves the device.
+  effect(() => { const r = top(); chatScreen.set(r.name === "channel" ? (scope() ? "/channel" : "/chat") : r.name === "team" ? "/settings" : `/${r.name}`); });
+  cleanup(() => chatScreen.set(null));
   const openScope = (slug: string | null) => { drawer.set(false); nav.popToRoot(); scope.set(slug); };
   // a channel's history beyond what this device holds; what is said there arrives live like the main chat's
   const channelFeed = signal<HubEvent[]>([]);
@@ -4724,14 +4927,30 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     if (!d) return null;
     return <DocPane doc={d} wide={!touch} expanded={readerWide()} onExpand={() => { if (!reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(180, "easeInEaseOut")); readerWide.set(!readerWide()); }} onClose={() => reading.set(null)} />;
   };
-  const visibleMessages = signal<HubEvent[]>([]);
+  /** The messages on screen, as the list last reported them, and the view they were in. */
+  const visibleMessages = signal<{ scope: string | null; events: HubEvent[] }>({ scope: null, events: [] });
+  let readTimer: ReturnType<typeof setTimeout> | undefined;
+  cleanup(() => clearTimeout(readTimer));
   effect(() => {
+    clearTimeout(readTimer);
     if (!reads.loaded() || lifecycle() !== "active") return;
     const route = top();
     if (onChannel()) {
+      const slug = scope();
+      // At the end the newest row is on screen: the whole view is read once it stayed there a moment (after the
+      // entry's "new messages" divider is placed). The list reports its viewable rows by index only, so a channel
+      // with as many rows as the view before reports nothing new; this doesn't wait for that report.
+      if (atEnd()) {
+        shown();
+        readTimer = setTimeout(() => {
+          if (untracked(atEnd) && untracked(onChannel) && untracked(scope) === slug && untracked(lifecycle) === "active") reads.read(untracked(shown) as HubEvent[]);
+        }, 300);
+        return;
+      }
       // Reading is top-down: everything at or above the newest row on screen counts as read, so rows the
-      // reader scrolled past (or jumped over to the bottom) don't pop back as unread later.
-      const seen = visibleMessages();
+      // reader scrolled past don't pop back as unread later. Rows reported in another view say nothing about this one.
+      const v = visibleMessages();
+      const seen = v.scope === slug ? v.events : [];
       const newest = seen.reduce((ts, e) => (e.ts > ts ? e.ts : ts), "");
       reads.read(newest ? untracked(shown).filter((e) => e.ts <= newest) as HubEvent[] : seen);
     }
@@ -5021,9 +5240,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     }
     composer?.focus();
   }
-  // Dictation (语音输入): nsh's Speech in the native apps, the browser's speech recognition (through
-  // host.js) on the web. Its words land in the composer where the caret was (or at the end), live as
-  // they are heard; nothing is sent. Where there is neither, there is no button.
+  // Dictation (语音输入): nsh-extra's Speech, which uses the system recognizer in the native apps and
+  // the browser's speech recognition on the web. Its words land in the composer where the caret was
+  // (or at the end), live as they are heard; nothing is sent. Where it is unavailable, there is no button.
   const canDictate = signal(false);
   const speech = signal<"off" | "on" | "stopping">("off");
   /** The light circles the composer as long as something is under way: dictation, or a sent message not yet delivered. */
@@ -5051,14 +5270,10 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
       sweepTimer = setTimeout(() => sweeps.set([]), (until - now) * 1000);
     });
   });
-  let native = false;
   let session: SpeechSession | null = null;
   void Speech.available()
     .catch(() => false)
-    .then(async (ok) => {
-      native = ok;
-      canDictate.set(ok || !!(await hostCall<{ supported: boolean }>("speechState"))?.supported);
-    });
+    .then((ok) => canDictate.set(ok));
   let caret: { start: number; end: number } | null = null;
   let before = "";
   let after = "";
@@ -5069,7 +5284,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     return /^zh\b/i.test(l) ? l : "zh-CN";
   };
   const speechError = (e: string) =>
-    e === "not-allowed" || e === "service-not-allowed" ? (native ? L("No microphone or speech recognition permission. Allow it in System Settings.", "没有麦克风或语音识别权限，请在系统设置里允许") : L("No microphone permission. Allow the microphone in your browser settings.", "没有麦克风权限，请在浏览器设置里允许使用麦克风"))
+    e === "not-allowed" || e === "service-not-allowed" ? (platform.os === "web" ? L("No microphone permission. Allow the microphone in your browser settings.", "没有麦克风权限，请在浏览器设置里允许使用麦克风") : L("No microphone or speech recognition permission. Allow it in System Settings.", "没有麦克风或语音识别权限，请在系统设置里允许"))
       : e === "no-speech" ? L("Didn’t hear anything", "没有听到声音")
       : e === "audio-capture" ? L("No microphone found", "找不到麦克风")
       : e === "network" ? L("Speech recognition needs a network connection", "语音识别需要联网")
@@ -5092,7 +5307,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     speech.set("off");
     if (error) attachNote.set(speechError(error));
   };
-  async function startDictation() {
+  function startDictation() {
     const v = draft();
     const start = Math.min(caret?.start ?? v.length, v.length);
     const end = Math.min(Math.max(caret?.end ?? v.length, start), v.length);
@@ -5101,24 +5316,17 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     dictated = v;
     attachNote.set(null);
     speech.set("on");
-    if (native) {
-      try {
-        const s = Speech.start({ lang: speechLang() });
-        session = s;
-        s.on("result", (r) => session === s && heard(r.text));
-        s.on("end", (e) => {
-          if (session !== s) return;
-          session = null;
-          ended(e.error);
-        });
-      } catch {
+    try {
+      const s = Speech.start({ lang: speechLang() });
+      session = s;
+      s.on("result", (r) => session === s && heard(r.text));
+      s.on("end", (e) => {
+        if (session !== s) return;
         session = null;
-        speech.set("off");
-        attachNote.set(L("Couldn’t start voice input", "无法开始语音输入"));
-      }
-      return;
-    }
-    if (!(await hostCall("speechStart", { lang: speechLang() })) && untracked(speech) === "on") {
+        ended(e.error);
+      });
+    } catch {
+      session = null;
       speech.set("off");
       attachNote.set(L("Couldn’t start voice input", "无法开始语音输入"));
     }
@@ -5128,19 +5336,13 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     if (drop) {
       speech.set("off");
       if (session) { const s = session; session = null; s.abort(); }
-      else void hostCall("speechAbort");
     } else {
       speech.set("stopping");
-      if (session) session.stop();
-      else void hostCall("speechStop");
+      session?.stop();
     }
   }
   /** The mic / stop button: start, stop (keeping the words), and if the recognizer hangs while finishing, a second press ends it. */
-  const toggleDictation = () => (speech() === "off" ? void startDictation() : stopDictation(speech() === "stopping"));
-  if (host.available()) {
-    host.on("speech", (p) => heard(String((p as { text?: string })?.text ?? "")));
-    host.on("speechEnd", (p) => ended((p as { error?: string })?.error));
-  }
+  const toggleDictation = () => (speech() === "off" ? startDictation() : stopDictation(speech() === "stopping"));
   cleanup(() => {
     if (untracked(speech) !== "off") stopDictation(true);
   });
@@ -5391,7 +5593,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
               onViewableItemsChange={({ viewableItems }) => {
                 firstVisibleRow = viewableItems.reduce((m, t) => Math.min(m, t.index ?? Infinity), Infinity);
                 lastVisibleRow = viewableItems.reduce((m, t) => Math.max(m, t.index ?? -1), -1);
-                visibleMessages.set(viewableItems.flatMap((t) => "event" in t.item ? [t.item.event] : []));
+                visibleMessages.set({ scope: untracked(scope), events: viewableItems.flatMap((t) => "event" in t.item ? [t.item.event] : []) });
               }}
               alignment="bottom"
               maintainVisibleContentPosition={{ autoscrollToBottomThreshold: AT_END }}
@@ -5559,8 +5761,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
               <If when={hub.conn() === "blocked"}>
                 <View style={{ gap: 6, paddingHorizontal: 14, paddingVertical: 10, borderRadius: radius.inset, backgroundColor: colors.surface, backgroundImage: `linear-gradient(${tints.danger}, ${tints.danger})` }}>
                   <Text style={{ fontSize: 14, color: colors.danger }}>
-                    {L(`This device's public IP ${hub.blockedIp()} isn't on the Worker's allow-list (HUB_ALLOW_IPS). Add it on the host; Noop reconnects by itself.`,
-                      `这台设备的出口 IP ${hub.blockedIp()} 不在允许名单（HUB_ALLOW_IPS）里。在主机上把它加进去，Noop 会自动重连。`)}
+                    {L(`This device's public IP ${hub.blockedIp()} isn't on the Worker's allow-list (HUB_ALLOW_IPS). Add it under Settings › IP allow-list on a device that can connect (or on the host); Noop reconnects by itself.`,
+                      `这台设备的出口 IP ${hub.blockedIp()} 不在允许名单（HUB_ALLOW_IPS）里。在能连上的设备的 设置 › IP 白名单 里把它加进去（或在主机上加），Noop 会自动重连。`)}
                   </Text>
                   <View style={{ flexDirection: "row" }}>
                     <Button label={L("Copy IP", "复制 IP")} onPress={() => void Clipboard.writeText(hub.blockedIp())} />
@@ -6251,7 +6453,7 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
       const r = await postJson(`${server()}/api/auth/start`, { email: e });
       if (r.status === 429) throw new Error(String(r.data.error ?? L("Too many requests. Try again later.", "请求太频繁，请稍后再试")));
       const ip = ipBlocked(r.status, r.data);
-      if (ip) throw new Error(L(`This device's public IP ${ip} isn't on the allow-list (HUB_ALLOW_IPS). Add it on the host, then try again.`, `这台设备的出口 IP ${ip} 不在允许名单（HUB_ALLOW_IPS）里，在主机上加进去后再试。`));
+      if (ip) throw new Error(L(`This device's public IP ${ip} isn't on the allow-list (HUB_ALLOW_IPS). Add it under Settings › IP allow-list on a device that can connect, then try again.`, `这台设备的出口 IP ${ip} 不在允许名单（HUB_ALLOW_IPS）里，在能连上的设备的 设置 › IP 白名单 里加进去后再试。`));
       if (r.data.error === "totp_not_setup") throw new Error(L("Two-step verification isn’t set up yet, so nobody can sign in. Run noop 2fa setup on your host first.", "还没有绑定两步验证，任何人都无法登录：先在你的主机上运行 noop 2fa setup"));
       if (r.status === 403) throw new Error(L("This email isn’t allowed to sign in", "这个邮箱不允许登录"));
       if (r.status === 503) throw new Error(L("The server can’t send email yet, so email sign-in isn’t available", "服务器还没有配置发信，暂时无法用邮箱登录"));
@@ -6470,6 +6672,9 @@ function App() {
   const email = signal("");
   const notice = signal("");
   let openRef: string | null = null;
+  // Analytics: a screen view per page (login, chat, a task...), flushed in batches and when the app goes to the background.
+  useNsMetry(nsmetry);
+  useScreenTracking(nsmetry, () => (!ready() ? null : config() ? chatScreen() : "/login"));
   loadConfig().then((r) => {
     openRef = r.ref;
     config.set(r.config);

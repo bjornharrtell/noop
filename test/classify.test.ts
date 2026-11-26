@@ -28,6 +28,9 @@ test("quota walls are still recognised, including reset hints that carry a time"
     "API Error: 402 Command Code Plan: You have insufficient credits to make this request. Please purchase more credits to continue using the service.",
     // Codex on a workspace plan: the run dies with no result block, so without this it retried as a plain failure
     "ERROR: Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+    // Claude Code's 403 when the subscription's payment lapsed: unclassified, every task ran twice and failed
+    // instead of cooling the account down and moving its work to the other CLI
+    "Claude Code can't use your Claude subscription, usually because a payment is past due · Pay or renew at https://claude.ai/settings/billing (if you just paid, try again shortly), or use an Anthropic API key instead",
   ]) expect(classify(msg)).toBe("quota");
 });
 

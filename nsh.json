@@ -38,11 +38,7 @@
       "setSession",
       "setBadge",
       "clearNotifications",
-      "vibrate",
-      "speechState",
-      "speechStart",
-      "speechStop",
-      "speechAbort"
+      "vibrate"
     ],
     "picker": true,
     "speech": true,
@@ -95,6 +91,7 @@
       ]
     },
     "nsh-icon": "^0.2.2",
-    "nsh-icon-lucide": "^0.2.1"
+    "nsh-icon-lucide": "^0.2.1",
+    "nsmetry": "^0.1.0"
   }
 }

@@ -106,7 +106,25 @@ function usesGateway(a: Account): boolean {
 function credStamp(a: Account): number {
   const dir = a.default ? join(homedir(), a.cli === "claude" ? ".claude" : ".codex") : a.dir;
   const f = join(dir, a.cli === "claude" ? ".credentials.json" : "auth.json");
-  try { return statSync(f).mtimeMs; } catch { return 0; }
+  try { return statSync(f).mtimeMs; } catch {}
+  // On macOS Claude Code keeps the default login in the Keychain, not .credentials.json: without this the stamp is
+  // always 0, a stale needs_login never clears after the owner logs in again, and the fleet stays paused for good.
+  if (a.cli === "claude" && a.default && process.platform === "darwin") return keychainStamp("Claude Code-credentials");
+  return 0;
+}
+
+/** Modification time of a macOS Keychain generic password (no secret is read), 0 if missing. */
+function keychainStamp(service: string): number {
+  try {
+    const r = Bun.spawnSync(["security", "find-generic-password", "-s", service], { stdout: "pipe", stderr: "pipe" });
+    return r.exitCode === 0 ? parseKeychainMdat(r.stdout.toString()) : 0;
+  } catch { return 0; }
+}
+
+/** `"mdat"<timedate>=0x… "20261126020914Z\000"` → epoch ms, 0 if absent. */
+export function parseKeychainMdat(out: string): number {
+  const m = out.match(/"mdat"<timedate>=\S*\s+"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z/);
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : 0;
 }
 
 export function usable(a: Account): boolean {
@@ -118,7 +136,7 @@ export function usable(a: Account): boolean {
     save(all);
     return true;
   }
-  if ((s.needs_login || s.cooldown_until) && s.cred && credStamp(a) > s.cred) {
+  if ((s.needs_login || s.cooldown_until) && s.cred !== undefined && credStamp(a) > s.cred) {
     // the owner logged in again (maybe another account): try it right away instead of waiting out the old limit
     all.accounts[key(a)] = { ...s, needs_login: false, cooldown_until: undefined, cred: undefined, told: undefined };
     save(all);
@@ -168,7 +186,7 @@ export function accountEnv(a: Account): Record<string, string> {
 // "try again at/in <time>" is a quota reset hint. A vague "try again in a moment" is what a gateway 5xx says
 // ("a server-side issue, usually temporary"): counting it as quota put the account on a one-hour cooldown
 // and moved all its work to the other CLI over a blip.
-const QUOTA = /usage limit|rate[ -]?limit|limit reached|quota|credit balance is too low|no credits remaining|insufficient credits|purchase more credits|out of credits|\b402\b|add credits to continue|too many requests|\b429\b|overloaded|hit your .*limit|try again (at|in)(?! (?:a|a few|some) (?:moments?|bit|while|seconds?|minutes?)\b)/i;
+const QUOTA = /usage limit|rate[ -]?limit|limit reached|quota|credit balance is too low|no credits remaining|insufficient credits|purchase more credits|out of credits|\b402\b|add credits to continue|payment is past due|too many requests|\b429\b|overloaded|hit your .*limit|try again (at|in)(?! (?:a|a few|some) (?:moments?|bit|while|seconds?|minutes?)\b)/i;
 // "login reached its time limit" is Claude Code's wording for a subscription login that expired and cannot be renewed.
 // Unrecognised, it is not an auth failure: the account is never parked and chat never fails over to the next account.
 const AUTH = /not logged in|please run \/login|invalid api key|authentication[_ ]error|\b401\b|oauth (token|session) (has )?expired|login reached its time limit|login required|unauthorized|codex login/i;
@@ -298,12 +316,16 @@ function loginCommand(a: Account): { cmd: string[]; needsCode: boolean } {
   return { cmd: ["claude", "setup-token"], needsCode: true };
 }
 
-/** Wrap in `script` so TUIs think they have a terminal (headless box, no monitor). */
-function withPty(cmd: string[]): string[] {
-  const q = cmd.map((c) => `'${c}'`).join(" ");
-  if (process.platform === "linux" && Bun.which("script")) return ["script", "-qfec", q, "/dev/null"];
-  if (process.platform === "darwin") return ["script", "-q", "/dev/null", ...cmd];
-  return cmd;
+/** How to run a login command so it can print its link without a monitor.
+ * - codex `login --device-auth` prints plain text: run it as is. Wrapping it in BSD `script` on macOS broke it,
+ *   because Bun's stdin pipe is a socket and `script` exits 1 with "tcgetattr/ioctl: Operation not supported on socket".
+ * - claude `setup-token` is a TUI that prints nothing without a terminal: give it a real pseudo-terminal
+ *   (Bun's `terminal` spawn option) on macOS, `script` on Linux, the bare command elsewhere. */
+export function loginSpawn(cli: string, cmd: string[], platform: string = process.platform, hasScript = !!Bun.which("script")): { argv: string[]; pty: boolean } {
+  if (cli === "codex") return { argv: cmd, pty: false };
+  if (platform === "linux" && hasScript) return { argv: ["script", "-qfec", cmd.map((c) => `'${c}'`).join(" "), "/dev/null"], pty: false };
+  if (platform === "darwin") return { argv: cmd, pty: true };
+  return { argv: cmd, pty: false };
 }
 
 export async function startLogin(a: Account, cfg: Cfg) {
@@ -314,10 +336,12 @@ export async function startLogin(a: Account, cfg: Cfg) {
   s.accounts[k] = { ...(s.accounts[k] ?? {}), login_id: id, login_tried: Date.now() };
   save(s);
   const { cmd, needsCode } = loginCommand(a);
-  const proc = Bun.spawn(withPty([...cmd, ...claudeAuthArgs(accountEnv(a))]), {
-    stdin: "pipe", stdout: "pipe", stderr: "pipe",
-    env: { ...process.env, ...accountEnv(a), BROWSER: "/bin/false", TERM: "xterm-256color", COLUMNS: "500" },
-  });
+  const { argv, pty } = loginSpawn(a.cli, [...cmd, ...claudeAuthArgs(accountEnv(a))]);
+  const env = { ...process.env, ...accountEnv(a), BROWSER: "/bin/false", TERM: "xterm-256color", COLUMNS: "500" };
+  const dec = new TextDecoder();
+  const proc = pty
+    ? Bun.spawn(argv, { env, terminal: { cols: 500, rows: 50, data: (_t, d) => void onData(dec.decode(d, { stream: true })) } })
+    : Bun.spawn(argv, { env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
   pending.set(id, { id, account: k, proc, started: Date.now() });
   let buf = "";
   let sent = false;
@@ -343,7 +367,7 @@ export async function startLogin(a: Account, cfg: Cfg) {
     const dec = new TextDecoder();
     for await (const c of stream) await onData(dec.decode(c));
   };
-  void Promise.all([pump(proc.stdout as ReadableStream), pump(proc.stderr as ReadableStream)]);
+  if (!pty) void Promise.all([pump(proc.stdout as ReadableStream), pump(proc.stderr as ReadableStream)]);
   proc.exited.then(async (code) => {
     pending.delete(id);
     const st = load();
@@ -367,6 +391,7 @@ export const pendingLoginIds = () => new Set(pending.keys());
 export function submitLoginCode(id: string, code: string): boolean {
   const p = pending.get(id);
   if (!p) return false;
+  if (p.proc.terminal) { p.proc.terminal.write(code.trim() + "\r"); return true; }
   const stdin = p.proc.stdin as import("bun").FileSink;
   stdin.write(code.trim() + "\r");
   stdin.flush();

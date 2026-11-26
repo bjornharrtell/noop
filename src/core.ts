@@ -1,7 +1,7 @@
 import "./test-isolation";
 // noop core — shared files as the world (stigmergy; synced via the owner's Worker, src/sync.ts), task queue, agent runner, journal, memory.
 import { OFFLINE_AFTER_MINUTES } from "../cloud/src/budget";
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { machineName } from "./machine";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -90,9 +90,9 @@ export function locked<T>(fn: () => Promise<T> | T): Promise<T> {
 
 export const hasRemote = async () => (await sync.syncMode()) === "remote";
 
-export const pull = (opts?: { force?: boolean }) => locked(() => _pull(opts));
+export const pull = (opts?: Parameters<typeof sync.pull>[0]) => locked(() => _pull(opts));
 /** Apply remote changes to DATA (remote wins on paths edited on both sides, except mergeable appends). */
-export const _pull = (opts?: { force?: boolean }): Promise<boolean> => sync.pull(opts);
+export const _pull = (opts?: Parameters<typeof sync.pull>[0]): Promise<boolean> => sync.pull(opts);
 
 /** Commit every local change via the Worker's compare-and-swap; false if we lost a race (or are offline). */
 export const commitPush = (msg: string, opts?: { force?: boolean }) => locked(() => _commitPush(msg, opts));
@@ -442,6 +442,12 @@ async function _claim(path: string, host: string): Promise<string | null> {
   if (await _commitPush(`[${host}] claim ${meta.id}: ${meta.title}`)) return dest;
   // undo only our claim (other pending local results stay queued); after a lost race the pull already applied the winner
   sync.revertLocal([relative(DATA, dest), relative(DATA, path)]);
+  // A claim of ours restored from the sync base is a stale copy: its delete never reached the Worker, so the base still
+  // holds it. Keeping it makes the reaper fire on every tick and rewrite the requeued copy from it, resetting the
+  // attempt and stall counters. A lost race restores the winner's claim instead, which names another host (one daemon
+  // per host: a claim naming this host that no run owns is stale by definition).
+  const back = existsSync(dest) ? readDoc(dest).meta : null;
+  if (back?.claimed_by === host) rmSync(dest, { force: true });
   // a task queued here and not pushed yet has no synced copy to revert to: put it back rather than delete it
   if (!readdirSync(P("tasks")).some((d) => existsSync(P("tasks", d, `${meta.id}.md`)))) writeFileSync(path, raw);
   return null;
