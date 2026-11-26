@@ -1,6 +1,6 @@
 [package]
 name = "noop-agent"
-version = "0.1.5"
+version = "0.1.6"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 noop-core = { path = "../noop-core" }
 async-trait = { version = "0.1", optional = true }
-copilot-sdk = { version = "2.0.4-preview.2", optional = true }
+copilot-sdk = { version = "2.0.4-preview.2", default-features = false, features = ["runtime"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

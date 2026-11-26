@@ -11,7 +11,32 @@ use std::time::Duration;
 use async_trait::async_trait;
 use copilot_sdk::handler::{PermissionHandler, PermissionResult};
 use copilot_sdk::types::{CreateSessionOptions, MessageOptions, PermissionRequestData, RequestId, SessionId};
-use copilot_sdk::{Client, ClientMode, ClientOptions};
+use copilot_sdk::{
+    CliProgram, Client, ClientMode, ClientOptions, RuntimeConnection, SpawnedProcessOptions,
+};
+
+/// Where the machine's own Copilot CLI is: `COPILOT_CLI_PATH`, else the first `copilot` on PATH.
+///
+/// The SDK is built without its bundled runtime, so the CLI the machine is logged in to is the one that runs; nothing is
+/// downloaded and the binary stays small.
+fn copilot_cli() -> Result<PathBuf, String> {
+    if let Ok(p) = std::env::var("COPILOT_CLI_PATH") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Ok(p);
+        }
+        return Err(format!("COPILOT_CLI_PATH={} is not a file", p.display()));
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join("copilot");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err("the GitHub Copilot CLI was not found on PATH: install it (curl -fsSL https://gh.io/copilot-install | bash) and log in once by running `copilot`".into())
+}
 
 use crate::gates;
 
@@ -46,9 +71,15 @@ impl PermissionHandler for Gates {
 
 /// Run one prompt in `cwd` and return the assistant's answer.
 pub async fn run(prompt: &str, cwd: &Path, model: Option<&str>, timeout: Duration) -> Result<Outcome, String> {
-    let client = Client::start(ClientOptions::new(ClientMode::CodingAgent))
+    let program = copilot_cli()?;
+    let runtime = RuntimeConnection::SpawnedStdio(SpawnedProcessOptions {
+        program: CliProgram::Path(program),
+        working_directory: cwd.to_path_buf(),
+        ..Default::default()
+    });
+    let client = Client::start(ClientOptions::new(ClientMode::CodingAgent).with_runtime(runtime))
         .await
-        .map_err(|e| format!("copilot: {e} (is the `copilot` CLI installed and logged in on this machine?)"))?;
+        .map_err(|e| format!("copilot: {e} (is the `copilot` CLI logged in on this machine?)"))?;
 
     let blocked = Arc::new(Mutex::new(Vec::new()));
     let mut cfg = {
