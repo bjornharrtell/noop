@@ -80,14 +80,49 @@ pub async fn step(ctx: &Ctx, host: &str, agent: &dyn Agent, wait_secs: u64) -> R
             continue;
         }
         let prompt = format!(
-            "The owner wrote this to the fleet:\n\n{text}\n\nAnswer the owner briefly, in two or three sentences. Start no other work."
+            "You are Noop, the owner's chief of staff, running on their machine. The owner wrote:\n\n{text}\n\n\
+Decide what this is:\n\
+- real work (fix, build, investigate, review, prepare a release: anything that takes more than a minute) means a task\n\
+- a question, a status check or small talk means an answer\n\
+Merging, releasing, publishing and touching credentials are the owner's call: still create the task, and its run asks.\n\
+Reply with ONE JSON object and nothing else:\n\
+{{\"action\":\"task\",\"title\":\"<under 80 characters>\",\"details\":\"<what to do, as much context as helps>\",\"priority\":\"normal\",\"text\":\"<one line to the owner>\"}}\n\
+or {{\"action\":\"reply\",\"text\":\"<the answer, two or three sentences>\"}}."
         );
         match agent.run(&prompt, &ctx.mirror()).await {
-            Ok(answer) if !answer.trim().is_empty() => {
-                reply(ctx, host, answer.trim()).await?;
-                out.answered += 1;
+            Ok(answer) => {
+                let json = json_object(&answer);
+                let action = json.as_ref().and_then(|j| j.get("action")).and_then(|v| v.as_str()).unwrap_or("reply");
+                let text_to_owner = json
+                    .as_ref()
+                    .and_then(|j| j.get("text"))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string);
+                if action == "task" {
+                    let title = json.as_ref().and_then(|j| j.get("title")).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                    if !title.is_empty() {
+                        let details = json.as_ref().and_then(|j| j.get("details")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let priority = json.as_ref().and_then(|j| j.get("priority")).and_then(|v| v.as_str()).unwrap_or("normal");
+                        let id = crate::work::queue_task(ctx, &title, &details, priority, "lead", "owner")?;
+                        crate::commit(ctx, &format!("task {id} from the owner")).await?;
+                        let line = text_to_owner.unwrap_or_else(|| format!("On it: {id} {title}"));
+                        reply(ctx, host, &line).await?;
+                        journal(ctx, host, &format!("task {id} from the owner: {title}"));
+                        out.answered += 1;
+                        continue;
+                    }
+                }
+                // a plain answer, or a task without a title: say what the agent said, as before
+                match text_to_owner.or_else(|| Some(answer.trim().to_string())).filter(|t| !t.is_empty()) {
+                    Some(t) => {
+                        reply(ctx, host, &t).await?;
+                        out.answered += 1;
+                    }
+                    None => journal(ctx, host, "a reply came back empty; nothing was posted"),
+                }
             }
-            Ok(_) => journal(ctx, host, "a reply came back empty; nothing was posted"),
             // the owner is never shown a raw failure; it goes to the journal for the fleet to see
             Err(e) => journal(ctx, host, &format!("could not answer the owner: {}", first_line(&e))),
         }
@@ -192,4 +227,11 @@ fn journal(ctx: &Ctx, host: &str, line: &str) {
 fn first_line(s: &str) -> String {
     let l = s.lines().next().unwrap_or("").trim();
     l.chars().take(160).collect()
+}
+
+/// The first JSON object in a reply, if there is one.
+fn json_object(s: &str) -> Option<serde_json::Value> {
+    let start = s.find('{')?;
+    let end = s[start..].rfind('}')? + start;
+    serde_json::from_str(&s[start..=end]).ok()
 }

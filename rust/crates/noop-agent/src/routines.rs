@@ -137,19 +137,9 @@ fn already_queued(ctx: &Ctx, name: &str) -> bool {
     false
 }
 
-/// The next free task id, `T-0001` style, looking at inbox, active and done.
+/// The next free task id, from the shared helper so routines and the owner's messages never mint the same one.
 fn next_id(ctx: &Ctx) -> String {
-    let mut max = 0u32;
-    for dir in ["inbox", "active", "done"] {
-        let Ok(rd) = std::fs::read_dir(ctx.mirror().join("tasks").join(dir)) else { continue };
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if let Some(num) = name.strip_prefix("T-").and_then(|n| n.trim_end_matches(".md").parse::<u32>().ok()) {
-                max = max.max(num);
-            }
-        }
-    }
-    format!("T-{:04}", max + 1)
+    crate::work::next_task_id(ctx)
 }
 
 /// Create the tasks for every routine that is due on this machine. Returns how many were queued.

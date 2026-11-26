@@ -39,10 +39,12 @@ logs written on two machines merge by line union instead of one side winning. A 
 into this machine's `config.toml` and shared.
 
 `noop serve` runs the two loops together — answering the owner and taking work — and is what `install-service` puts in
-the unit, so a machine left running both replies in chat and claims tasks. `noop watch` drains the server's inbox with a
-saved cursor, holding the request open up to 25 seconds when the inbox is empty, so an idle machine asks rarely. An owner
-message runs one Copilot session and the answer is posted back as a `notice`, which is what the chat shows; a failure goes
-to the journal, never to the owner as a raw error. The service unit runs as the user whose `copilot` login the runs use.
+the unit, so a machine left running both replies in chat and claims tasks. An owner message decides what it is: a question
+is answered in two or three sentences; real work becomes a task in `tasks/inbox/` with the owner's wording as its details,
+and the answer says which task it is (`On it: T-0007 …`). Merging, releasing and credentials stay the owner's call: the
+assistant still creates the task and its run asks. `noop watch` drains the server's inbox with a saved cursor, holding the
+request open up to 25 seconds when the inbox is empty, so an idle machine asks rarely. A failure goes to the journal, never
+to the owner as a raw error. The service unit runs as the user whose `copilot` login the runs use.
 
 A task is a Markdown file with front matter in `tasks/inbox/`. Claiming moves it to `tasks/active/` and commits it
 once: the server's compare-and-swap is the lock, so of two machines that try at the same time exactly one wins and the

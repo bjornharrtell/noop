@@ -60,6 +60,36 @@ fn tasks_dir(ctx: &Ctx, kind: &str) -> PathBuf {
     ctx.mirror().join("tasks").join(kind)
 }
 
+/// The next free task id, `T-0001` style, after whatever is in inbox, active and done.
+pub fn next_task_id(ctx: &Ctx) -> String {
+    let mut max = 0u32;
+    for kind in ["inbox", "active", "done", "blocked", "rejected"] {
+        let Ok(rd) = std::fs::read_dir(tasks_dir(ctx, kind)) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if let Some(n) = name.strip_prefix("T-").and_then(|n| n.trim_end_matches(".md").parse::<u32>().ok()) {
+                max = max.max(n);
+            }
+        }
+    }
+    format!("T-{:04}", max + 1)
+}
+
+/// Put a task the owner asked for into the inbox.
+pub fn queue_task(ctx: &Ctx, title: &str, details: &str, priority: &str, agent: &str, source: &str) -> Result<String, String> {
+    let id = next_task_id(ctx);
+    let mut meta: BTreeMap<String, String> = BTreeMap::new();
+    meta.insert("id".into(), id.clone());
+    meta.insert("title".into(), title.to_string());
+    meta.insert("agent".into(), if agent.is_empty() { "lead".into() } else { agent.to_string() });
+    meta.insert("host".into(), "any".into());
+    meta.insert("priority".into(), if priority.is_empty() { "normal".into() } else { priority.to_string() });
+    meta.insert("source".into(), source.to_string());
+    meta.insert("created".into(), today());
+    write_doc(&tasks_dir(ctx, "inbox").join(format!("{id}.md")), &meta, if details.is_empty() { title } else { details })?;
+    Ok(id)
+}
+
 /// Task files waiting for a machine, most important first.
 pub fn inbox(ctx: &Ctx) -> Vec<PathBuf> {
     let rank = |p: &str| match p {
