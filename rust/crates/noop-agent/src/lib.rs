@@ -25,6 +25,8 @@ pub mod work;
 pub mod bridge;
 pub mod merge;
 pub mod update;
+pub mod routines;
+pub mod supervisor;
 
 #[cfg(feature = "copilot")]
 pub mod copilot;

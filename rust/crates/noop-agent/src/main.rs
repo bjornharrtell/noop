@@ -117,6 +117,27 @@ async fn main() {
             let host = hostname();
             let once = args.iter().any(|a| a == "--once");
             loop {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                // housekeeping before taking work: routines that are due, claims nobody finished
+                match noop_agent::routines::queue(&c, &host, now) {
+                    Ok(n) if n > 0 => {
+                        let _ = noop_agent::commit(&c, "routines").await;
+                        println!("queued {n} routine task(s)");
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("routines: {e}"),
+                }
+                match noop_agent::supervisor::reap(&c, &host, now) {
+                    Ok(n) if n > 0 => {
+                        let _ = noop_agent::commit(&c, "release stale claims").await;
+                        println!("released {n} stale claim(s)");
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("supervisor: {e}"),
+                }
                 match noop_agent::work::work_once(&c, &host, &agent).await {
                     Ok(Some(d)) => println!("{}: {}", d.id, d.result.lines().next().unwrap_or("").trim()),
                     Ok(None) => {
