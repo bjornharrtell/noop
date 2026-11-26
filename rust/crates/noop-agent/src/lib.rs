@@ -22,6 +22,7 @@ pub const DEFAULT_MODEL: &str = "gpt-6-luna";
 pub mod gates;
 
 pub mod work;
+pub mod bridge;
 
 #[cfg(feature = "copilot")]
 pub mod copilot;

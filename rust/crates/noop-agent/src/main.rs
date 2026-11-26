@@ -10,7 +10,7 @@
 //! The mirror lives in `$NOOP_HOME/data` (default `~/.noop/data`); `noop.toml` beside it holds the server URL and the
 //! machine key.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use noop_agent::Ctx;
 
@@ -29,7 +29,7 @@ fn fail(msg: impl std::fmt::Display) -> ! {
     std::process::exit(1);
 }
 
-const USAGE: &str = "usage: noop <init <server url> --token <machine key> | pull | commit -m <message> | ask <prompt> | work [--once] | status | version>";
+const USAGE: &str = "usage: noop <init <server url> --token <machine key> | pull | commit -m <message> | ask <prompt> | work [--once] | watch [--once] | install-service [--now] | uninstall-service | status | version>";
 
 #[tokio::main]
 async fn main() {
@@ -135,6 +135,46 @@ async fn main() {
         }
         #[cfg(not(feature = "copilot"))]
         Some("work") => fail("this build has no agent runner (built with --no-default-features)"),
+        #[cfg(feature = "copilot")]
+        Some("watch") => {
+            let c = ctx(&home);
+            let agent = noop_agent::copilot::Copilot { model: Some(noop_agent::read_model(&home)), timeout: std::time::Duration::from_secs(600) };
+            let host = hostname();
+            let once = args.iter().any(|a| a == "--once");
+            loop {
+                // the server holds the request up to 25 s when nothing is waiting, so an idle machine asks rarely
+                match noop_agent::bridge::step(&c, &host, &agent, 25).await {
+                    Ok(s) => {
+                        if s.answered > 0 {
+                            println!("answered {} message(s), cursor {}", s.answered, s.after);
+                        }
+                        if once {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        if once {
+                            fail(e)
+                        }
+                        eprintln!("inbox: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "copilot"))]
+        Some("watch") => fail("this build has no agent runner (built with --no-default-features)"),
+        Some("install-service") => {
+            let start = args.iter().any(|a| a == "--now");
+            match install_service(&home, start) {
+                Ok(m) => println!("{m}"),
+                Err(e) => fail(e),
+            }
+        }
+        Some("uninstall-service") => match uninstall_service() {
+            Ok(m) => println!("{m}"),
+            Err(e) => fail(e),
+        },
         Some("status") => {
             let ctx = ctx(&home);
             match noop_agent::status(&ctx).await {
@@ -155,4 +195,48 @@ fn ctx(home: &PathBuf) -> Ctx {
 
 fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_string()).unwrap_or_else(|_| "machine".into())
+}
+
+/// Remove the service, if it is installed.
+fn uninstall_service() -> Result<String, String> {
+    let unit = PathBuf::from("/etc/systemd/system/noop-agent.service");
+    if !unit.is_file() {
+        return Ok("noop-agent.service is not installed".into());
+    }
+    let run = |args: &[&str]| std::process::Command::new("systemctl").args(args).status();
+    run(&["disable", "--now", "noop-agent"]).ok();
+    std::fs::remove_file(&unit).map_err(|e| format!("remove unit: {e}"))?;
+    run(&["daemon-reload"]).ok();
+    Ok("stopped and removed noop-agent.service (the mirror in ~/.noop/data is untouched)".into())
+}
+
+/// Install the watch loop as a systemd service, running as the user whose `copilot` login the runs use.
+fn install_service(home: &Path, start: bool) -> Result<String, String> {
+    if !PathBuf::from("/run/systemd/system").is_dir() {
+        return Err("this machine does not run systemd; start it yourself: noop watch".into());
+    }
+    let user = std::env::var("SUDO_USER").map_err(|_| "run it as root: sudo noop install-service")?;
+    if user == "root" {
+        return Err("log in to `copilot` as a normal user, then run: sudo noop install-service".into());
+    }
+    let exe = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
+    let home_dir = format!("/home/{user}");
+    let unit = format!(
+        "# /etc/systemd/system/noop-agent.service — the machine's Noop loop. Remove: sudo noop uninstall-service\n[Unit]\nDescription=Noop machine\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser={user}\nWorkingDirectory={h}\nEnvironment=NOOP_HOME={h}\nEnvironment=HOME={hd}\nExecStart={exe} watch\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=multi-user.target\n",
+        h = home.display(),
+        hd = home_dir,
+        exe = exe.display(),
+    );
+    std::fs::write("/etc/systemd/system/noop-agent.service", unit).map_err(|e| format!("systemd unit: {e}"))?;
+    let run = |args: &[&str]| std::process::Command::new("systemctl").args(args).status();
+    run(&["daemon-reload"]).map_err(|e| format!("systemctl: {e}"))?;
+    let mut enable = vec!["enable", "noop-agent"];
+    if start {
+        enable.push("--now");
+    }
+    run(&enable).map_err(|e| format!("systemctl enable: {e}"))?;
+    Ok(format!(
+        "installed /etc/systemd/system/noop-agent.service as {user}{}\n  check: systemctl status noop-agent    logs: journalctl -u noop-agent -f",
+        if start { " (started)" } else { " (enabled; start it with: sudo systemctl start noop-agent)" }
+    ))
 }

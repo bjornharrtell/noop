@@ -164,12 +164,12 @@ pub async fn work_once(ctx: &Ctx, host: &str, agent: &dyn Agent) -> Result<Optio
 
 /// Add a line to today's journal, the fleet's running record.
 fn journal(ctx: &Ctx, host: &str, line: &str) {
-    let path = ctx.mirror().join("journal").join(format!("{}.md", chrono_like_date()));
+    let path = ctx.mirror().join("journal").join(format!("{}.md", today()));
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).ok();
     }
-    let mut text = std::fs::read_to_string(&path).unwrap_or_else(|_| format!("# Journal {}\n\n", chrono_like_date()));
-    text.push_str(&format!("- {} `{host}` {line}\n", chrono_like_time()));
+    let mut text = std::fs::read_to_string(&path).unwrap_or_else(|_| format!("# Journal {}\n\n", today()));
+    text.push_str(&format!("- {} `{host}` {line}\n", hhmm()));
     std::fs::write(&path, text).ok();
 }
 
@@ -216,10 +216,14 @@ fn stamp(fmt: &str) -> String {
 fn chrono_like_now() -> String {
     format!("{}T{}:00Z", stamp("date"), stamp("time"))
 }
-fn chrono_like_date() -> String {
+
+/// Today in UTC, `YYYY-MM-DD`, as the journal files are named.
+pub fn today() -> String {
     stamp("date")
 }
-fn chrono_like_time() -> String {
+
+/// Now in UTC, `HH:MM`, as journal lines are stamped.
+pub fn hhmm() -> String {
     stamp("time")
 }
 
