@@ -17,7 +17,7 @@ pub fn append_only(rel: &str) -> bool {
 /// A conflict marker left by a merge tool: dropped, so a merge never produces more of them.
 fn marker(line: &str) -> bool {
     let b = line.as_bytes();
-    let runs = [b'<', b'=', b'>'];
+    let runs = *b"<=>";
     runs.iter().any(|c| line.len() >= 7 && b[..7].iter().all(|x| x == c) && (b.len() == 7 || b[7] == b' '))
 }
 

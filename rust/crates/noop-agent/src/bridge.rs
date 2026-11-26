@@ -153,7 +153,7 @@ fn merge_toml(dst: &mut toml::Value, patch: &serde_json::Value) -> bool {
         let to = match v {
             serde_json::Value::String(s) => Some(toml::Value::String(s.clone())),
             serde_json::Value::Bool(b) => Some(toml::Value::Boolean(*b)),
-            serde_json::Value::Number(n) => n.as_i64().map(|i| toml::Value::Integer(i)).or_else(|| n.as_f64().map(toml::Value::Float)),
+            serde_json::Value::Number(n) => n.as_i64().map(toml::Value::Integer).or_else(|| n.as_f64().map(toml::Value::Float)),
             serde_json::Value::Array(a) => {
                 let items: Option<Vec<toml::Value>> = a
                     .iter()
