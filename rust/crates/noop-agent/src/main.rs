@@ -29,7 +29,7 @@ fn fail(msg: impl std::fmt::Display) -> ! {
     std::process::exit(1);
 }
 
-const USAGE: &str = "usage: noop <init <server url> --token <machine key> | pull | commit -m <message> | ask <prompt> | work [--once] | watch [--once] | decide <D-0001> <answer> | install-service [--now] | uninstall-service | self-update [--force] | status | version>";
+const USAGE: &str = "usage: noop <init <server url> --token <machine key> | pull | commit -m <message> | ask <prompt> | work [--once] | watch [--once] | serve | decide <D-0001> <answer> | install-service [--now] | uninstall-service | self-update [--force] | status | version>";
 
 #[tokio::main]
 async fn main() {
@@ -114,48 +114,8 @@ async fn main() {
         Some("work") => {
             let c = ctx(&home);
             let agent = noop_agent::copilot::Copilot { model: Some(noop_agent::read_model(&home)), timeout: std::time::Duration::from_secs(1800) };
-            let host = hostname();
             let once = args.iter().any(|a| a == "--once");
-            loop {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
-                // housekeeping before taking work: routines that are due, claims nobody finished
-                match noop_agent::routines::queue(&c, &host, now) {
-                    Ok(n) if n > 0 => {
-                        let _ = noop_agent::commit(&c, "routines").await;
-                        println!("queued {n} routine task(s)");
-                    }
-                    Ok(_) => {}
-                    Err(e) => eprintln!("routines: {e}"),
-                }
-                match noop_agent::supervisor::reap(&c, &host, now) {
-                    Ok(n) if n > 0 => {
-                        let _ = noop_agent::commit(&c, "release stale claims").await;
-                        println!("released {n} stale claim(s)");
-                    }
-                    Ok(_) => {}
-                    Err(e) => eprintln!("supervisor: {e}"),
-                }
-                match noop_agent::work::work_once(&c, &host, &agent).await {
-                    Ok(Some(d)) => println!("{}: {}", d.id, d.result.lines().next().unwrap_or("").trim()),
-                    Ok(None) => {
-                        if once {
-                            println!("nothing waiting");
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    }
-                    Err(e) => {
-                        if once {
-                            fail(e)
-                        }
-                        eprintln!("run failed: {e}");
-                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    }
-                }
-            }
+            work_forever(&c, &agent, &hostname(), once).await;
         }
         #[cfg(not(feature = "copilot"))]
         Some("work") => fail("this build has no agent runner (built with --no-default-features)"),
@@ -163,34 +123,26 @@ async fn main() {
         Some("watch") => {
             let c = ctx(&home);
             let agent = noop_agent::copilot::Copilot { model: Some(noop_agent::read_model(&home)), timeout: std::time::Duration::from_secs(600) };
-            let host = hostname();
             let once = args.iter().any(|a| a == "--once");
-            loop {
-                // the server holds the request up to 25 s when nothing is waiting, so an idle machine asks rarely
-                match noop_agent::bridge::step(&c, &host, &agent, 25).await {
-                    Ok(s) => {
-                        if s.answered > 0 {
-                            println!("answered {} message(s), cursor {}", s.answered, s.after);
-                        }
-                        if s.files {
-                            println!("shared files changed (settings, channel or cancel); pulled");
-                        }
-                        if once {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        if once {
-                            fail(e)
-                        }
-                        eprintln!("inbox: {e}");
-                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                    }
-                }
-            }
+            watch_forever(&c, &agent, &hostname(), once).await;
         }
         #[cfg(not(feature = "copilot"))]
         Some("watch") => fail("this build has no agent runner (built with --no-default-features)"),
+        #[cfg(feature = "copilot")]
+        Some("serve") => {
+            // what the service runs: answer the owner and take work at the same time
+            let c = ctx(&home);
+            let model = noop_agent::read_model(&home);
+            let answering = noop_agent::copilot::Copilot { model: Some(model.clone()), timeout: std::time::Duration::from_secs(600) };
+            let working = noop_agent::copilot::Copilot { model: Some(model), timeout: std::time::Duration::from_secs(1800) };
+            let host = hostname();
+            let (a, w) = (c.clone(), c);
+            let (ha, hw) = (host.clone(), host);
+            println!("noop serve: answering the owner and taking work as {ha}");
+            tokio::join!(watch_forever(&w, &answering, &hw, false), work_forever(&a, &working, &ha, false));
+        }
+        #[cfg(not(feature = "copilot"))]
+        Some("serve") => fail("this build has no agent runner (built with --no-default-features)"),
         Some("install-service") => {
             let start = args.iter().any(|a| a == "--now");
             match install_service(&home, start) {
@@ -255,6 +207,78 @@ fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_string()).unwrap_or_else(|_| "machine".into())
 }
 
+/// Answer the owner, forever (or once). The server holds the request up to 25 s when nothing is waiting, so an idle
+/// machine asks rarely.
+#[cfg(feature = "copilot")]
+async fn watch_forever(c: &noop_agent::Ctx, agent: &dyn noop_agent::work::Agent, host: &str, once: bool) {
+    loop {
+        match noop_agent::bridge::step(c, host, agent, 25).await {
+            Ok(s) => {
+                if s.answered > 0 {
+                    println!("answered {} message(s), cursor {}", s.answered, s.after);
+                }
+                if s.files {
+                    println!("shared files changed (settings, channel or cancel); pulled");
+                }
+                if once {
+                    break;
+                }
+            }
+            Err(e) => {
+                if once {
+                    fail(e)
+                }
+                eprintln!("inbox: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        }
+    }
+}
+
+/// Housekeeping, then one task at a time, forever (or until the queue is empty with `once`).
+#[cfg(feature = "copilot")]
+async fn work_forever(c: &noop_agent::Ctx, agent: &dyn noop_agent::work::Agent, host: &str, once: bool) {
+    loop {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        match noop_agent::routines::queue(c, host, now) {
+            Ok(n) if n > 0 => {
+                let _ = noop_agent::commit(c, "routines").await;
+                println!("queued {n} routine task(s)");
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("routines: {e}"),
+        }
+        match noop_agent::supervisor::reap(c, host, now) {
+            Ok(n) if n > 0 => {
+                let _ = noop_agent::commit(c, "release stale claims").await;
+                println!("released {n} stale claim(s)");
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("supervisor: {e}"),
+        }
+        match noop_agent::work::work_once(c, host, agent).await {
+            Ok(Some(d)) => println!("{}: {}", d.id, d.result.lines().next().unwrap_or("").trim()),
+            Ok(None) => {
+                if once {
+                    println!("nothing waiting");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+            Err(e) => {
+                if once {
+                    fail(e)
+                }
+                eprintln!("run failed: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        }
+    }
+}
+
 /// Remove the service, if it is installed.
 fn uninstall_service() -> Result<String, String> {
     let unit = PathBuf::from("/etc/systemd/system/noop-agent.service");
@@ -282,7 +306,7 @@ fn install_service(home: &Path, start: bool) -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
     let home_dir = format!("/home/{user}");
     let unit = format!(
-        "# /etc/systemd/system/noop-agent.service — the machine's Noop loop. Remove: sudo noop uninstall-service\n[Unit]\nDescription=Noop machine\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser={user}\nWorkingDirectory={h}\nEnvironment=NOOP_HOME={h}\nEnvironment=HOME={hd}\nExecStart={exe} watch\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=multi-user.target\n",
+        "# /etc/systemd/system/noop-agent.service — the machine's Noop loop. Remove: sudo noop uninstall-service\n[Unit]\nDescription=Noop machine\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser={user}\nWorkingDirectory={h}\nEnvironment=NOOP_HOME={h}\nEnvironment=HOME={hd}\nExecStart={exe} serve\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=multi-user.target\n",
         h = home.display(),
         hd = home_dir,
         exe = exe.display(),
