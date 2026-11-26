@@ -203,6 +203,17 @@ fn ctx(home: &PathBuf) -> Ctx {
     }
 }
 
+/// A user's home directory from `/etc/passwd`.
+fn passwd_home(user: &str) -> Option<String> {
+    let text = std::fs::read_to_string("/etc/passwd").ok()?;
+    text.lines()
+        .filter(|l| !l.starts_with('#'))
+        .find_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            (f.len() > 5 && f[0] == user && !f[5].is_empty()).then(|| f[5].to_string())
+        })
+}
+
 fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_string()).unwrap_or_else(|_| "machine".into())
 }
@@ -304,10 +315,17 @@ fn install_service(home: &Path, start: bool) -> Result<String, String> {
         return Err("log in to `copilot` as a normal user, then run: sudo noop install-service".into());
     }
     let exe = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
-    let home_dir = format!("/home/{user}");
+    // sudo resets HOME, so the unit must get the user's real home and mirror path, not root's
+    let home_dir = passwd_home(&user).unwrap_or_else(|| format!("/home/{user}"));
+    let noop_home = match std::env::var("NOOP_HOME") {
+        Ok(h) => PathBuf::from(h),
+        // the invoking shell's mirror counts only when it sits in this user's home (not root's)
+        Err(_) if home.starts_with(&home_dir) => home.to_path_buf(),
+        Err(_) => PathBuf::from(&home_dir).join(".noop"),
+    };
     let unit = format!(
         "# /etc/systemd/system/noop-agent.service — the machine's Noop loop. Remove: sudo noop uninstall-service\n[Unit]\nDescription=Noop machine\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser={user}\nWorkingDirectory={h}\nEnvironment=NOOP_HOME={h}\nEnvironment=HOME={hd}\nExecStart={exe} serve\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=multi-user.target\n",
-        h = home.display(),
+        h = noop_home.display(),
         hd = home_dir,
         exe = exe.display(),
     );
