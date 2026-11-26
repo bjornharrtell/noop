@@ -11,12 +11,19 @@ use std::path::{Path, PathBuf};
 /// Where the releases come from; `NOOP_REPO` overrides (a fork, a mirror).
 pub const REPO: &str = "bjornharrtell/noop";
 
-/// The archive for this build's architecture, as the workflow names it.
-pub fn asset_name() -> &'static str {
-    match std::env::consts::ARCH {
-        "aarch64" => "noop-agent-aarch64-linux.tar.gz",
-        _ => "noop-agent-x86_64-linux.tar.gz",
-    }
+/// The archive for a build, as the workflow names it: `noop-agent-<arch>-<os>.tar.gz`.
+pub fn asset_name_for(arch: &str, os: &str) -> String {
+    let arch = match arch {
+        "aarch64" | "arm64" => "aarch64",
+        _ => "x86_64",
+    };
+    let os = if os == "macos" { "darwin" } else { "linux" };
+    format!("noop-agent-{arch}-{os}.tar.gz")
+}
+
+/// The archive for this machine.
+pub fn asset_name() -> String {
+    asset_name_for(std::env::consts::ARCH, std::env::consts::OS)
 }
 
 /// `server-v0.1.9` → `0.1.9`.
@@ -110,7 +117,7 @@ pub async fn run(home: &Path, current: &str, force: bool) -> Result<Outcome, Str
             .map(str::to_string)
             .ok_or_else(|| format!("release {tag} has no {name}"))
     };
-    let (tarball_url, sums_url) = (url(asset)?, url("SHA256SUMS")?);
+    let (tarball_url, sums_url) = (url(&asset)?, url("SHA256SUMS")?);
 
     let dir: PathBuf = home.join("update");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -123,7 +130,7 @@ pub async fn run(home: &Path, current: &str, force: bool) -> Result<Outcome, Str
         }
     };
     let sums = String::from_utf8(get(sums_url).await?).map_err(|_| "SHA256SUMS is not text")?;
-    let wanted = checksum_for(&sums, asset).ok_or_else(|| format!("SHA256SUMS names no {asset}"))?.to_string();
+    let wanted = checksum_for(&sums, &asset).ok_or_else(|| format!("SHA256SUMS names no {asset}"))?.to_string();
     let tarball = get(tarball_url).await?;
     let got = sha256hex(&tarball);
     if got != wanted {
@@ -145,6 +152,15 @@ pub async fn run(home: &Path, current: &str, force: bool) -> Result<Outcome, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assets_follow_the_platform() {
+        assert_eq!(asset_name_for("x86_64", "linux"), "noop-agent-x86_64-linux.tar.gz");
+        assert_eq!(asset_name_for("aarch64", "linux"), "noop-agent-aarch64-linux.tar.gz");
+        assert_eq!(asset_name_for("aarch64", "macos"), "noop-agent-aarch64-darwin.tar.gz");
+        assert_eq!(asset_name_for("arm64", "macos"), "noop-agent-aarch64-darwin.tar.gz");
+        assert_eq!(asset_name_for("x86_64", "macos"), "noop-agent-x86_64-darwin.tar.gz");
+    }
 
     #[test]
     fn versions_compare_numerically() {

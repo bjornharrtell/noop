@@ -225,7 +225,7 @@ async fn main() {
                 Ok(noop_agent::update::Outcome::Updated { from, to }) => {
                     println!("updated {from} → {to}");
                     if std::env::var("INVOCATION_ID").is_ok() {
-                        println!("running as a service: exit so systemd starts the new binary");
+                        println!("restart the service to use it: systemctl restart noop-agent");
                     } else {
                         println!("start it again to use the new binary");
                     }
