@@ -29,7 +29,7 @@ fn fail(msg: impl std::fmt::Display) -> ! {
     std::process::exit(1);
 }
 
-const USAGE: &str = "usage: noop <init <server url> --token <machine key> | pull | commit -m <message> | ask <prompt> | status | version>";
+const USAGE: &str = "usage: noop <init <server url> --token <machine key> | pull | commit -m <message> | ask <prompt> | work [--once] | status | version>";
 
 #[tokio::main]
 async fn main() {
@@ -107,6 +107,34 @@ async fn main() {
         }
         #[cfg(not(feature = "copilot"))]
         Some("ask") => fail("this build has no agent runner (built with --no-default-features)"),
+        #[cfg(feature = "copilot")]
+        Some("work") => {
+            let c = ctx(&home);
+            let agent = noop_agent::copilot::Copilot { model: Some(noop_agent::read_model(&home)), timeout: std::time::Duration::from_secs(1800) };
+            let host = hostname();
+            let once = args.iter().any(|a| a == "--once");
+            loop {
+                match noop_agent::work::work_once(&c, &host, &agent).await {
+                    Ok(Some(d)) => println!("{}: {}", d.id, d.result.lines().next().unwrap_or("").trim()),
+                    Ok(None) => {
+                        if once {
+                            println!("nothing waiting");
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
+                    Err(e) => {
+                        if once {
+                            fail(e)
+                        }
+                        eprintln!("run failed: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "copilot"))]
+        Some("work") => fail("this build has no agent runner (built with --no-default-features)"),
         Some("status") => {
             let ctx = ctx(&home);
             match noop_agent::status(&ctx).await {

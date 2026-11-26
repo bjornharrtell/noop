@@ -69,6 +69,22 @@ impl PermissionHandler for Gates {
     }
 }
 
+/// The Copilot agent as the work loop sees it: a model, a timeout, and the machine's own login.
+pub struct Copilot {
+    pub model: Option<String>,
+    pub timeout: Duration,
+}
+
+impl crate::work::Agent for Copilot {
+    fn run<'a>(
+        &'a self,
+        prompt: &'a str,
+        cwd: &'a Path,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>> {
+        Box::pin(async move { run(prompt, cwd, self.model.as_deref(), self.timeout).await.map(|o| o.text) })
+    }
+}
+
 /// Run one prompt in `cwd` and return the assistant's answer.
 pub async fn run(prompt: &str, cwd: &Path, model: Option<&str>, timeout: Duration) -> Result<Outcome, String> {
     let program = copilot_cli()?;

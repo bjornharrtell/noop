@@ -21,6 +21,8 @@ pub const DEFAULT_MODEL: &str = "gpt-6-luna";
 
 pub mod gates;
 
+pub mod work;
+
 #[cfg(feature = "copilot")]
 pub mod copilot;
 
@@ -317,6 +319,38 @@ pub async fn commit(ctx: &Ctx, msg: &str) -> Result<Commit, String> {
         }
     }
     Err("commit: still conflicting after 3 attempts".into())
+}
+
+/// Send local changes once, without retrying: `Ok(None)` means another machine committed first.
+///
+/// Task claiming uses this. The retrying [`commit`] pulls and re-sends, which for a move would claim the same task twice;
+/// a claim must lose cleanly instead.
+pub async fn commit_once(ctx: &Ctx, msg: &str) -> Result<Option<Commit>, String> {
+    let mut st = load_state(ctx);
+    let changes = scan(ctx, &st);
+    if changes.is_empty() {
+        return Ok(Some(Commit { pushed: 0, rev: st.since }));
+    }
+    let pushed = changes.len();
+    let (code, body) = ctx.call("POST", "/api/files/commit", Some(serde_json::json!({ "msg": msg, "changes": changes }))).await?;
+    match code {
+        200 => {
+            let rev = num(body.get("rev"));
+            for f in body.get("files").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+                let path = str_of(f.get("path")).to_string();
+                if f.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    st.files.remove(&path);
+                } else {
+                    st.files.insert(path, FileState { version: num(f.get("version")), hash: str_of(f.get("hash")).to_string() });
+                }
+            }
+            st.since = rev;
+            save_state(ctx, &st)?;
+            Ok(Some(Commit { pushed, rev }))
+        }
+        409 => Ok(None),
+        _ => Err(format!("commit: server answered {code} {}", str_of(body.get("error")))),
+    }
 }
 
 // ------------------------------------------------------------------ status
